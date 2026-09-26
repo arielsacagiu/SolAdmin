@@ -1,0 +1,51 @@
+# ==============================================================================
+# SolAdmin lifecycle automation example (Raydium AMM v4 path)
+# ------------------------------------------------------------------------------
+# Run with:
+#   soladmin lifecycle --config config/lifecycle.raydium.example.yaml
+#
+# Flow: create token -> create OpenBook V1 market + seed Raydium AMM v4 pool
+# with liquidity -> monitor pool vaults -> auto-exit -> consolidate.
+# ==============================================================================
+
+treasuryKeystore: "./wallets/treasury.keystore.json"
+buyerKeystoreDir: "./wallets/buyers"
+simulationMode: true
+
+create:
+  enabled: true
+  name: "Raydium Demo"
+  symbol: "RDEMO"
+  decimals: 9
+  totalSupplyRaw: "1000000000000000000"  # 1B tokens (9 decimals)
+  metadataUri: "https://example.com/metadata.json"
+  tokenProgram: "spl"
+
+launch:
+  launchpad: "raydium-amm-v4"
+  bundledBuyers: 4
+  buyLamportsPerWallet: "200000000"     # 0.2 SOL per buyer (added as liquidity side)
+  slippageBps: 500
+  jitoTipLamports: "200000"
+  launchDelayMs: 3000
+
+monitor:
+  enabled: true
+  intervalMs: 5000
+  subscribeTrades: false
+  verbose: true
+
+exit:
+  enabled: true
+  takeProfitMultiplier: 1.5
+  stopLossFraction: 0.7
+  maxHoldSeconds: 7200
+  slippageBps: 1000
+  route: "raydium"                      # jupiter | raydium | pumpfun | moonit
+
+consolidate:
+  enabled: true
+  destinationKeystore: "./wallets/treasury.keystore.json"
+  swapTokensToSol: true
+  slippageBps: 500
+  leaveLamportsPerWallet: "0"

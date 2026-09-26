@@ -1,0 +1,35 @@
+{
+  "name": "@solana-toolkit/volume-bot",
+  "version": "1.0.0",
+  "description": "Anti-MEV volume bot — atomic buy+sell round trips across Solana venues (intra-transaction or Jito bundles) with wallet pool, funding, budget caps and unwind/consolidation",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rimraf dist .turbo",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.8",
+    "@solana/spl-token": "^0.4.13",
+    "@solana-toolkit/types": "workspace:*",
+    "@solana-toolkit/utils": "workspace:*",
+    "@solana-toolkit/rpc-client": "workspace:*",
+    "@solana-toolkit/transaction-builder": "workspace:*",
+    "@solana-toolkit/wallet-manager": "workspace:*",
+    "@solana-toolkit/venues": "workspace:*"
+  },
+  "devDependencies": {
+    "rimraf": "^6.0.1",
+    "vitest": "^2.1.8"
+  }
+}

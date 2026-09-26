@@ -1,0 +1,16 @@
+packages:
+  # Core shared packages
+  - "packages/types"
+  - "packages/utils"
+  - "packages/rpc-client"
+  - "packages/transaction-builder"
+  - "packages/wallet-manager"
+  - "packages/solana-programs"
+  - "packages/venues"
+  # Feature packages
+  - "packages/volume-bot"
+  - "packages/dex"
+  - "packages/services"
+  # Applications
+  - "apps/cli"
+  - "apps/web"

@@ -1,0 +1,82 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Anti-MEV Volume Bot — example configuration
+#
+# SAFETY DEFAULTS
+#   - Simulation mode is enforced by the toolkit. This file alone sends NOTHING.
+#   - Real execution requires BOTH:
+#       SOLADMIN_SIMULATION_MODE=false  (in .env)
+#       soladmin --execute volbot run --file <this-file>
+#
+# INTEGRITY
+#   Synthetic volume / wash trading can violate laws, exchange rules and venue
+#   policies. Use for localnet testing, program fuzzing, staging, and disclosed
+#   research only. Never present generated volume as organic market activity.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Venue: pumpfun | pumpswap | launchlab | cpmm | jupiter | auto
+#   auto probes cheapest-first: pump.fun curve → PumpSwap pool →
+#   LaunchLab/Bonk → Raydium CPMM → Jupiter route probe.
+venue: auto
+
+# Token mint to volume (paired against SOL/WSOL).
+mint: "So11111111111111111111111111111111111111112"  # REPLACE with your mint
+
+# Wallet pool. Keystores are soladmin-keystore envelopes (AES-256-GCM, scrypt)
+# or legacy Solana CLI arrays (loaded with a warning). Passwords come from
+# SOLADMIN_KEYSTORE_PASSWORD — never store them in this file.
+wallets:
+  keystoreDir: "./wallets/volbot"
+  maxWallets: 8
+
+# Optional funder keystore: tops up pool wallets before the run (execute mode)
+# and pays the Jito bundle tip when bundleTipFromFunder=true.
+funderKeystore: "./wallets/funder.json"
+
+# SOL size per round trip, in lamports. min/max define a uniform random range.
+# 0.01–0.05 SOL here for illustration.
+tradeLamports:
+  min: "10000000"
+  max: "50000000"
+
+slippageBps: 300          # 3% — volume legs need room, round trips are atomic
+
+schedule:
+  rounds: 20              # total rounds across the pool
+  walletsPerRound: 2      # bundle mode: members per bundle
+  intervalMs: 15000       # delay between rounds
+  jitterMs: 5000          # +0..5000ms random — spreads timing
+
+# execution: intra-tx (default) — buy+sell in ONE transaction, zero exposure
+#            bundle    — one round-trip tx per wallet, all in a Jito bundle
+execution: intra-tx
+
+# dispatch: rpc | jito-tx | jito-bundle
+#   jito-bundle is implied by execution:bundle. jito-tx relays each tx through
+#   the block engine's single-transaction endpoint.
+dispatch: rpc
+
+# Pay the Jito tip from the funder keystore instead of the last wallet.
+bundleTipFromFunder: false
+
+# Hard caps — the engine STOPS when a cap is hit.
+budget:
+  maxNetCostLamports: "50000000"     # ≤0.05 SOL net loss over the whole run
+  maxVolumeLamports: "2000000000"    # ≤2 SOL gross notional pushed
+  maxPerWalletLamports: "60000000"   # per-trip ceiling
+
+# After the run: sell residual tokens, close ATAs, sweep SOL.
+unwind:
+  sellResidualTokens: true
+  consolidateTo: ""        # defaults to funder when empty
+  leaveLamports: "1000000" # ~0.001 SOL kept per wallet for rent
+
+# Priority fee override (optional; falls back to toolkit safety config).
+priorityFee:
+  dynamic: true
+  percentile: 75
+  maxMicroLamportsPerCu: 5000000
+  # jitoTipLamports: 100000   # per-bundle tip when paying from funder
+
+# Venue-specific overrides (optional)
+# cpmmPoolAddress: "…"          # skip CPMM pool discovery scan
+# launchlabShareFeeRate: "0"    # share_fee_rate arg (ppm)

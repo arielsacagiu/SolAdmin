@@ -1,0 +1,36 @@
+{
+  "name": "@solana-toolkit/services",
+  "version": "1.0.0",
+  "description": "Feature services: multisend, batch collection, transfer-all, token creator/clone, authority management, burn, freeze, audits, holder scans, claims, stealth transfers, exchange bulk withdrawals, static website generator, chain tools",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rimraf dist .turbo",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.8",
+    "@solana/spl-token": "^0.4.9",
+    "@solana-toolkit/types": "workspace:*",
+    "@solana-toolkit/utils": "workspace:*",
+    "@solana-toolkit/rpc-client": "workspace:*",
+    "@solana-toolkit/transaction-builder": "workspace:*",
+    "@solana-toolkit/wallet-manager": "workspace:*",
+    "@solana-toolkit/solana-programs": "workspace:*",
+    "@solana-toolkit/dex": "workspace:*"
+  },
+  "devDependencies": {
+    "rimraf": "^6.0.1",
+    "vitest": "^2.1.8"
+  }
+}

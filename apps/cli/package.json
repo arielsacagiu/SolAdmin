@@ -1,0 +1,35 @@
+{
+  "name": "@solana-toolkit/cli",
+  "version": "1.0.0",
+  "description": "SolAdmin command-line interface — every toolkit module as a command",
+  "type": "module",
+  "bin": {
+    "soladmin": "dist/main.js"
+  },
+  "main": "./dist/main.js",
+  "types": "./dist/main.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rimraf dist .turbo",
+    "test": "echo 'cli tests are covered by e2e scripts'"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "@solana/web3.js": "^1.95.8",
+    "@solana/spl-token": "^0.4.9",
+    "@solana-toolkit/types": "workspace:*",
+    "@solana-toolkit/utils": "workspace:*",
+    "@solana-toolkit/rpc-client": "workspace:*",
+    "@solana-toolkit/transaction-builder": "workspace:*",
+    "@solana-toolkit/wallet-manager": "workspace:*",
+    "@solana-toolkit/solana-programs": "workspace:*",
+    "@solana-toolkit/dex": "workspace:*",
+    "@solana-toolkit/services": "workspace:*",
+    "@solana-toolkit/venues": "workspace:*",
+    "@solana-toolkit/volume-bot": "workspace:*"
+  },
+  "devDependencies": {
+    "rimraf": "^6.0.1"
+  }
+}

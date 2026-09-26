@@ -1,0 +1,32 @@
+{
+  "name": "@solana-toolkit/wallet-manager",
+  "version": "1.0.0",
+  "description": "Encrypted JSON keystores, batch wallet generation, vanity address generation and batch balance checks",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rimraf dist .turbo",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.8",
+    "@solana/spl-token": "^0.4.9",
+    "@solana-toolkit/types": "workspace:*",
+    "@solana-toolkit/utils": "workspace:*",
+    "@solana-toolkit/rpc-client": "workspace:*"
+  },
+  "devDependencies": {
+    "rimraf": "^6.0.1",
+    "vitest": "^2.1.8"
+  }
+}

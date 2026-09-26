@@ -1,0 +1,63 @@
+# ==============================================================================
+# SolAdmin lifecycle automation example (Pump.fun path)
+# ------------------------------------------------------------------------------
+# Run with:
+#   soladmin lifecycle --config config/lifecycle.pumpfun.example.yaml
+#
+# Flow: create token -> launch on Pump.fun with 8 bundled buyers -> monitor
+# the bonding curve -> auto-sell on take-profit/stop-loss -> consolidate all
+# proceeds back to the treasury. Every stage honors simulation mode.
+# ==============================================================================
+
+# Keystore that funds and signs everything (create your own first:
+#   soladmin wallet keystore-create --out wallets/treasury.keystore.json)
+treasuryKeystore: "./wallets/treasury.keystore.json"
+
+# Buyer wallets are generated here when missing (encrypted keystores).
+buyerKeystoreDir: "./wallets/buyers"
+
+# Force simulation regardless of environment (safe for first runs).
+simulationMode: true
+
+create:
+  enabled: true
+  name: "SolAdmin Demo"
+  symbol: "DEMO"
+  decimals: 6
+  totalSupplyRaw: "1000000000000"     # 1,000,000 tokens (6 decimals)
+  metadataUri: "https://example.com/metadata.json"
+  imageFilePath: "./assets/logo.png"
+  tokenProgram: "spl"                  # or "token-2022" with extensions below
+  # extensions:
+  #   transferFeeBps: 100              # 1% tax (Token-2022)
+  #   transferFeeMaxRaw: "1000000"
+  #   metadataOnChain: true
+
+launch:
+  launchpad: "pumpfun"                 # pumpfun | moonit | raydium-amm-v4
+  bundledBuyers: 8                     # pumpfun supports up to 28; moonit up to 6
+  buyLamportsPerWallet: "100000000"    # 0.1 SOL per buyer
+  slippageBps: 1000                    # 10% slippage for the launch buys
+  jitoTipLamports: "200000"
+  launchDelayMs: 2000
+
+monitor:
+  enabled: true
+  intervalMs: 5000
+  subscribeTrades: true
+  verbose: true
+
+exit:
+  enabled: true
+  takeProfitMultiplier: 2.0            # sell at +100%
+  stopLossFraction: 0.5                # sell at -50%
+  maxHoldSeconds: 3600                 # or after 1 hour, whichever first
+  slippageBps: 1500
+  route: "pumpfun"                     # jupiter | pumpfun | raydium | moonit
+
+consolidate:
+  enabled: true
+  destinationKeystore: "./wallets/treasury.keystore.json"
+  swapTokensToSol: true
+  slippageBps: 500
+  leaveLamportsPerWallet: "0"

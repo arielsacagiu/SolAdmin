@@ -1,0 +1,4 @@
+[
+  { "keystore": "wallets/buyers/buyer-1.keystore.json", "to": "DestinationAddress1", "amountRaw": "500000", "mint": "MintAddress" },
+  { "keystore": "wallets/buyers/buyer-2.keystore.json", "to": "DestinationAddress2", "amountRaw": "500000", "mint": "MintAddress" }
+]

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.turbo/
+coverage/
+*.log
+.env
+.env.local
+*.keystore.json
+wallets/
+keys/
+output/*.csv
+output/*.json
+!output/.gitkeep
+.DS_Store

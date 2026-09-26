@@ -1,0 +1,30 @@
+{
+  "name": "@solana-toolkit/rpc-client",
+  "version": "1.0.0",
+  "description": "Solana RPC wrapper, WebSocket subscriptions, priority fee monitor and Jito Block Engine bundle client",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rimraf dist .turbo",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.8",
+    "@solana-toolkit/types": "workspace:*",
+    "@solana-toolkit/utils": "workspace:*"
+  },
+  "devDependencies": {
+    "rimraf": "^6.0.1",
+    "vitest": "^2.1.8"
+  }
+}

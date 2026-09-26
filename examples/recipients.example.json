@@ -1,0 +1,5 @@
+[
+  { "address": "RecipientWalletPublicKey1", "amountRaw": "1000000" },
+  { "address": "RecipientWalletPublicKey2", "amountRaw": "1000000" },
+  { "address": "RecipientWalletPublicKey3", "amountRaw": "2500000" }
+]

@@ -1,0 +1,42 @@
+# ==============================================================================
+# SolAdmin toolkit configuration (YAML)
+# ------------------------------------------------------------------------------
+# Copy to config/toolkit.local.yaml, adjust, and run commands with:
+#   soladmin --config config/toolkit.local.yaml <command>
+#
+# Environment variables override these values (see .env.example).
+# SIMULATION MODE IS THE DEFAULT. Execution requires BOTH:
+#   SOLADMIN_SIMULATION_MODE=false  AND the --execute flag.
+# ==============================================================================
+
+rpc:
+  # Any JSON-RPC endpoint: Helius, QuickNode, Triton, a local validator...
+  rpcUrl: "https://api.mainnet-beta.solana.com"
+  wsUrl: "wss://api.mainnet-beta.solana.com"
+  cluster: "mainnet"          # mainnet | devnet | localnet
+  commitment: "confirmed"     # processed | confirmed | finalized
+  maxRetries: 5
+  retryBackoffMs: 500
+
+jito:
+  blockEngineUrl: "https://mainnet.block-engine.jito.wtf"
+  # Regional relays (lower latency): amsterdam | dublin | frankfurt | london |
+  # ny | slc | singapore | tokyo — https://<region>.mainnet.block-engine.jito.wtf
+  tipLamports: 100000         # minimum tip per bundle (1e5 lamports = 0.0001 SOL)
+  relaySingleTxs: true
+  statusTimeoutMs: 30000
+
+safety:
+  simulationMode: true         # NEVER commit a file with this set to false
+  priorityFee:
+    dynamic: false
+    microLamportsPerCu: 200000
+    maxMicroLamportsPerCu: 10000000
+  maxComputeUnits: 1400000
+
+# Named keystores referenced by commands (paths only — secrets stay encrypted).
+keystores:
+  treasury: "./wallets/treasury.keystore.json"
+  # buyersDir: "./wallets/buyers"
+
+outputDir: "./output"

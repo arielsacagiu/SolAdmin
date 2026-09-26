@@ -1,0 +1,9 @@
+[
+  {
+    "asset": "SOL",
+    "network": "Solana",
+    "destinationAddress": "YourWhitelistedSolanaAddress",
+    "amount": 1.5,
+    "clientOrderId": "soladmin-wd-001"
+  }
+]

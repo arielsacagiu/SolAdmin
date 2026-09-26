@@ -1,0 +1,27 @@
+{
+  "name": "@solana-toolkit/web",
+  "version": "1.0.0",
+  "description": "Optional lightweight Express web UI for the SolAdmin toolkit",
+  "type": "module",
+  "main": "./dist/server.js",
+  "types": "./dist/server.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rimraf dist .turbo"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "@solana/web3.js": "^1.95.8",
+    "@solana-toolkit/types": "workspace:*",
+    "@solana-toolkit/utils": "workspace:*",
+    "@solana-toolkit/services": "workspace:*",
+    "@solana-toolkit/dex": "workspace:*",
+    "@solana-toolkit/wallet-manager": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "rimraf": "^6.0.1"
+  }
+}
