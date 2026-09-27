@@ -51,6 +51,9 @@ export const PROGRAMS = {
 /** Wrapped SOL mint. */
 export const WSOL_MINT = NATIVE_MINT.toBase58();
 
+/** Circle USDC mint (mainnet). The profit pipeline targets USDC on this mint. */
+export const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+
 /** System program (for convenience imports without web3.js). */
 export const SYSTEM_PROGRAM = '11111111111111111111111111111111';
 

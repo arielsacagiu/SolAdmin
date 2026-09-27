@@ -18,7 +18,7 @@ import {
 } from '@solana/spl-token';
 import type { AuthorityAction, SendOutcome } from '@solana-toolkit/types';
 import { moduleLogger } from '@solana-toolkit/utils';
-import type { ServiceContext } from './context.js';
+import type { ChainContext } from './context.js';
 import { scanTokenHolders } from './holders.js';
 import {
   metadataPda,
@@ -61,7 +61,7 @@ export interface AuthorityOpReport {
  * metadata update authority, and (for token admins) market-level roles.
  */
 export async function applyAuthorityActions(
-  ctx: ServiceContext,
+  ctx: ChainContext,
   opts: AuthorityOpOptions,
 ): Promise<AuthorityOpReport> {
   const mintPk = pk(opts.mint);
@@ -130,7 +130,7 @@ export async function applyAuthorityActions(
  * recommended "safety lock" after launch. IRREVERSIBLE.
  */
 export async function revokeAllAuthorities(
-  ctx: ServiceContext,
+  ctx: ChainContext,
   params: { wallet: Keypair; mint: string; mode?: 'simulate' | 'execute' },
 ): Promise<AuthorityOpReport> {
   return applyAuthorityActions(ctx, {
@@ -153,7 +153,7 @@ export async function revokeAllAuthorities(
  * Burns a token balance from the wallet's ATA. IRREVERSIBLE — reduces supply.
  */
 export async function burnToken(
-  ctx: ServiceContext,
+  ctx: ChainContext,
   params: { wallet: Keypair; mint: string; amountRaw: bigint; mode?: 'simulate' | 'execute' },
 ): Promise<SendOutcome> {
   const tokenProgram = await detectProgram(ctx, params.mint);
@@ -183,7 +183,7 @@ export async function burnToken(
  * pool: burned LP can never be re-minted, permanently locking liquidity.
  */
 export async function burnLpByMint(
-  ctx: ServiceContext,
+  ctx: ChainContext,
   params: { wallet: Keypair; lpMint: string; amountRaw?: bigint; mode?: 'simulate' | 'execute' },
 ): Promise<SendOutcome> {
   const tokenProgram = await detectProgram(ctx, params.lpMint);
@@ -210,7 +210,7 @@ export async function burnLpByMint(
  * authority — see the security warnings around freezing).
  */
 export async function freezeAccount(
-  ctx: ServiceContext,
+  ctx: ChainContext,
   params: {
     authority: Keypair;
     mint: string;
@@ -246,7 +246,7 @@ export async function freezeAccount(
  * tool, and freezing without cause harms holders.
  */
 export async function autoFreezeAllHolders(
-  ctx: ServiceContext,
+  ctx: ChainContext,
   params: { authority: Keypair; mint: string; mode?: 'simulate' | 'execute' },
 ): Promise<{ frozen: string[]; failures: string[]; outcomes: SendOutcome[] }> {
   // Use paginated full holder scanning (getProgramAccounts) instead of
@@ -276,7 +276,7 @@ export async function autoFreezeAllHolders(
   return { frozen, failures, outcomes };
 }
 
-async function detectProgram(ctx: ServiceContext, mint: string): Promise<PublicKey> {
+async function detectProgram(ctx: ChainContext, mint: string): Promise<PublicKey> {
   const info = await ctx.rpc.accountInfo(mint);
   if (!info) throw new Error(`mint ${mint} not found`);
   return info.owner.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58() ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
@@ -286,7 +286,7 @@ async function detectProgram(ctx: ServiceContext, mint: string): Promise<PublicK
  * Claim creator fees from Pump.fun creator vaults for a list of wallets.
  */
 export async function claimPumpfunCreatorFees(
-  ctx: ServiceContext,
+  ctx: ChainContext,
   params: { wallets: Keypair[]; mode?: 'simulate' | 'execute' },
 ): Promise<{ outcomes: SendOutcome[]; failures: string[] }> {
   const outcomes: SendOutcome[] = [];
@@ -313,7 +313,7 @@ export async function claimPumpfunCreatorFees(
 
 /** Migrates legacy metadata accounts to the current Token Metadata layout. */
 export async function migrateMetadata(
-  ctx: ServiceContext,
+  ctx: ChainContext,
   params: { wallet: Keypair; mint: string; mode?: 'simulate' | 'execute' },
 ): Promise<SendOutcome> {
   return ctx.sender.send(

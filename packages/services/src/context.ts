@@ -24,6 +24,14 @@ export interface ServiceContext {
   outputDir: string;
 }
 
+/**
+ * Structural context subset (rpc + sender) shared by `ServiceContext` and
+ * the dex package's `DexContext`. Functions that only read balances and send
+ * transactions accept this type so either context can be passed without
+ * unsafe casts.
+ */
+export type ChainContext = Pick<ServiceContext, 'rpc' | 'sender'>;
+
 export function createServiceContext(config: ToolkitConfig): ServiceContext {
   const rpc = createRpcClient(config.rpc);
   const jito = createJitoClient(config.jito);

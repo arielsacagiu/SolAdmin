@@ -18,6 +18,11 @@ import { registerExchangeCommands } from './cmds/exchange.js';
 import { registerChainCommands } from './cmds/chain.js';
 import { registerLifecycleCommand } from './cmds/lifecycle.js';
 import { registerVolbotCommands } from './cmds/volbot.js';
+// New refactored architecture commands
+import { registerAnonymityCommand } from './cmds/anonymity.js';
+import { registerControllerCommand } from './cmds/controller.js';
+import { registerSocialCommand } from './cmds/social.js';
+import { registerPipelineCommand } from './cmds/pipeline.js';
 
 const program = new Command();
 
@@ -43,6 +48,11 @@ registerExchangeCommands(program);
 registerChainCommands(program);
 registerLifecycleCommand(program);
 registerVolbotCommands(program);
+// New refactored architecture commands
+registerAnonymityCommand(program);
+registerControllerCommand(program);
+registerSocialCommand(program);
+registerPipelineCommand(program);
 
 program.parseAsync(process.argv).catch((err) => {
   // eslint-disable-next-line no-console

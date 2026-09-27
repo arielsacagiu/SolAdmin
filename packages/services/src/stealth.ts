@@ -12,7 +12,7 @@
 import { Keypair, PublicKey, SystemProgram, TransactionInstruction } from '@solana/web3.js';
 import type { SendOutcome, StealthTransferPlan } from '@solana-toolkit/types';
 import { moduleLogger, sleep } from '@solana-toolkit/utils';
-import type { ServiceContext } from './context.js';
+import type { ChainContext } from './context.js';
 
 const log = moduleLogger('stealth');
 
@@ -91,7 +91,7 @@ export function planStealthTransfer(opts: StealthTransferOptions): StealthTransf
  * destination.
  */
 export async function executeStealthTransfer(
-  ctx: ServiceContext,
+  ctx: ChainContext,
   opts: StealthTransferOptions,
 ): Promise<{ plan: StealthTransferPlan; outcomes: SendOutcome[] }> {
   const plan = planStealthTransfer(opts);

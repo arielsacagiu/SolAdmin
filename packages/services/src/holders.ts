@@ -10,7 +10,7 @@ import { PublicKey } from '@solana/web3.js';
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import type { HolderRow, NftHolderRow } from '@solana-toolkit/types';
 import { moduleLogger, retry, writeCsv } from '@solana-toolkit/utils';
-import type { ServiceContext } from './context.js';
+import type { ChainContext } from './context.js';
 
 const log = moduleLogger('holders');
 
@@ -19,7 +19,7 @@ const log = moduleLogger('holders');
  * NOTE: large holder sets are fetched in pages of `pageSize` accounts.
  */
 export async function scanTokenHolders(
-  ctx: ServiceContext,
+  ctx: ChainContext,
   mint: string,
   opts: { pageSize?: number; maxAccounts?: number } = {},
 ): Promise<HolderRow[]> {
@@ -92,7 +92,7 @@ export async function scanTokenHolders(
  * candy-machine id) and this resolves the current owner of each edition.
  */
 export async function scanNftHolders(
-  ctx: ServiceContext,
+  ctx: ChainContext,
   mints: string[],
 ): Promise<NftHolderRow[]> {
   const rows: NftHolderRow[] = [];
@@ -133,7 +133,7 @@ export function exportNftHoldersCsv(file: string, rows: NftHolderRow[]): string 
   );
 }
 
-async function accountOwner(ctx: ServiceContext, tokenAccount: PublicKey, program: PublicKey): Promise<string | undefined> {
+async function accountOwner(ctx: ChainContext, tokenAccount: PublicKey, program: PublicKey): Promise<string | undefined> {
   try {
     const info = await ctx.rpc.connection.getParsedAccountInfo(tokenAccount);
     const owner = (info.value?.data as { parsed?: { info?: { owner?: string } } }).parsed?.info?.owner;

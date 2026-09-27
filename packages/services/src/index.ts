@@ -11,3 +11,8 @@ export * from './website-generator.js';
 export * from './chain-tools.js';
 export * from './metadata-update.js';
 export * from './token-admin.js';
+// New modules for refactored architecture
+export * from './anonymity.js';
+export * from './controller.js';
+export * from './social-promotion.js';
+export * from './profit-pipeline.js';
