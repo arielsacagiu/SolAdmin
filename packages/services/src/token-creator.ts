@@ -11,7 +11,7 @@
 import { Keypair, PublicKey, TransactionInstruction } from '@solana/web3.js';
 import type { CreateTokenSpec, SendOutcome, TokenCreationReport } from '@solana-toolkit/types';
 import { moduleLogger } from '@solana-toolkit/utils';
-import type { ServiceContext } from './context.js';
+import type { ChainContext } from './context.js';
 import {
   createMetadataInstructions,
   createMintInstructions,
@@ -40,7 +40,7 @@ export interface CreateTokenOptions extends CreateTokenSpec {
  *   3. Metaplex metadata (official mpl-token-metadata createV1)
  *   4. authority revocation per options (default: revoke everything)
  */
-export async function createToken(ctx: ServiceContext, opts: CreateTokenOptions): Promise<TokenCreationReport> {
+export async function createToken(ctx: ChainContext, opts: CreateTokenOptions): Promise<TokenCreationReport> {
   const rentLamports = BigInt(
     await ctx.rpc.connection.getMinimumBalanceForRentExemption(
       mintAccountSize({ program: opts.tokenProgram, transferFee: opts.transferFee, transferHookProgramId: opts.transferHookProgramId }),
@@ -128,7 +128,7 @@ export interface CloneTokenOptions {
  * creates an identical new token (metadata, decimals, supply; optionally
  * transfer-fee extension).
  */
-export async function cloneToken(ctx: ServiceContext, opts: CloneTokenOptions): Promise<TokenCreationReport> {
+export async function cloneToken(ctx: ChainContext, opts: CloneTokenOptions): Promise<TokenCreationReport> {
   const sourceInfo = await ctx.rpc.connection.getParsedAccountInfo(pk(opts.sourceMint));
   const parsed = (sourceInfo.value?.data as { parsed?: { info?: { decimals?: number; supply?: string; freezeAuthority?: string; mintAuthority?: string } } }).parsed?.info;
   if (!parsed) throw new Error(`source mint ${opts.sourceMint} not found`);

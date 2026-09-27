@@ -44,6 +44,7 @@ export function registerControllerCommand(program: Command): void {
     .option('--enable-exit', 'enable automatic exit')
     .option('--enable-social', 'enable social promotion')
     .option('--route-to-usdc', 'route profits to USDC')
+    .option('--no-create', 'skip the mint creation stage (requires an existing mint in the config)')
     .option('--dry-run', 'run in dry-run mode (simulate all operations)')
     .option('--treasury-funder <file>', 'persistent root keystore that funds each fresh rotated treasury (required for execute mode)')
     .option('--freeze-authority <file>', 'keystore of the mint freeze authority (enables the freeze stage)')
@@ -64,6 +65,8 @@ export function registerControllerCommand(program: Command): void {
       enableExit?: boolean;
       enableSocial?: boolean;
       routeToUsdc?: boolean;
+      /** Commander --no-create sets this to false; default undefined = create. */
+      create?: boolean;
       dryRun?: boolean;
       treasuryFunder?: string;
       freezeAuthority?: string;
@@ -85,6 +88,14 @@ export function registerControllerCommand(program: Command): void {
         metadataUri: opts.metadataUri,
         tokenDecimals: 9,
         tokenSupplyRaw: 1_000_000_000_000_000_000n, // 1M tokens
+
+        // Creation: the controller deploys the mint itself (Stage 0) unless
+        // --no-create; freeze authority is retained so the freeze stage can
+        // act on the mint it just created.
+        createTokenEnabled: opts.create !== false,
+        keepMintAuthority: false,
+        keepFreezeAuthority: true,
+        revokeMetadataAuthority: true,
 
         // Launch configuration
         launchVenue: opts.launchVenue as any,

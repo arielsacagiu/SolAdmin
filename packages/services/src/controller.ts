@@ -49,6 +49,8 @@ import {
 } from './anonymity.js';
 import { SocialPromotionManager, type SocialPromotionConfig } from './social-promotion.js';
 import { startProfitPipeline } from './profit-pipeline.js';
+import { createToken } from './token-creator.js';
+import { retry } from '@solana-toolkit/utils';
 
 const log = moduleLogger('lifecycle-controller');
 
@@ -111,6 +113,21 @@ export interface LifecycleConfig {
   mint?: string;
   /** Token program to use (spl or token-2022). Default: spl */
   tokenProgram?: 'spl' | 'token-2022';
+  /**
+   * Create the mint inside the lifecycle (Stage 0) when `mint` is absent.
+   * The creation payer is `options.treasuryFunder`.
+   */
+  createTokenEnabled: boolean;
+  /** Keep the mint authority after creation (WARNING: less safe for holders). */
+  keepMintAuthority: boolean;
+  /**
+   * Keep the freeze authority after creation. MUST be true whenever
+   * `freezeWhenHoldersReached` is true — the freeze stage signs with the
+   * mint's freeze authority, and createToken revokes it by default.
+   */
+  keepFreezeAuthority: boolean;
+  /** Revoke the metadata update authority after creation. */
+  revokeMetadataAuthority: boolean;
 
   // Launch configuration
   /** Venue for initial launch (pumpfun, moonit, raydium, custom). */
@@ -196,6 +213,12 @@ export const DEFAULT_LIFECYCLE_CONFIG: Partial<LifecycleConfig> = {
   // Token defaults
   tokenDecimals: 9,
   tokenProgram: 'spl',
+  // Creation defaults: freeze authority retained so the freeze stage can
+  // act; mint/metadata authorities revoked per the post-launch safety lock.
+  createTokenEnabled: false,
+  keepMintAuthority: false,
+  keepFreezeAuthority: true,
+  revokeMetadataAuthority: true,
 
   // Launch defaults
   launchVenue: 'pumpfun',
@@ -483,6 +506,9 @@ export class LifecycleController {
     );
 
     try {
+      // Stage 0: Creation (idempotent — skips when the mint exists or is disabled)
+      await this.runStage('creation', this.executeCreation.bind(this));
+
       // Stage 1: Pre-launch setup (validation, wallet generation)
       await this.runStage('pre-launch', this.executePreLaunch.bind(this));
 
@@ -630,6 +656,80 @@ export class LifecycleController {
   // ---------------------------------------------------------------------------
   // Stage Implementations
   // ---------------------------------------------------------------------------
+
+  /**
+   * Stage 0: Token creation.
+   * Deploys the mint inside the lifecycle (idempotent — skipped when the
+   * mint already exists or creation is disabled). The persistent root wallet
+   * (treasuryFunder) pays mint rent and metadata fees; the same keypair is
+   * the retained freeze authority, which is what later lets the freeze
+   * stage (autoFreezeAllHolders) actually authorize freezes.
+   */
+  private async executeCreation(): Promise<StageResult> {
+    if (this.mintAddress) {
+      return {
+        stage: 'creation',
+        success: true,
+        message: `Mint provided externally: ${this.mintAddress}`,
+        data: { mint: this.mintAddress },
+      };
+    }
+    if (!this.config.createTokenEnabled) {
+      return {
+        stage: 'creation',
+        success: true,
+        message: 'Creation disabled and no mint provided — launch stage will fail without one',
+        data: {},
+      };
+    }
+    if (!this.options.treasuryFunder) {
+      return {
+        stage: 'creation',
+        success: false,
+        message: 'Creation requires options.treasuryFunder (pays mint rent + metadata fees)',
+      };
+    }
+
+    const report = await createToken(this.ctx, {
+      payer: this.options.treasuryFunder,
+      mode: this.options.dryRun ? 'simulate' : 'execute',
+      metadata: {
+        name: this.config.tokenName,
+        symbol: this.config.tokenSymbol,
+        uri: this.config.metadataUri,
+      },
+      decimals: this.config.tokenDecimals,
+      initialSupplyRaw: this.config.tokenSupplyRaw,
+      tokenProgram: this.config.tokenProgram ?? 'spl',
+      keepMintAuthority: this.config.keepMintAuthority,
+      keepFreezeAuthority: this.config.keepFreezeAuthority,
+      revokeMetadataAuthority: this.config.revokeMetadataAuthority,
+    });
+
+    this.setMintAddress(report.mint);
+
+    // Post-creation verification through the failover pool: confirm the
+    // mint account exists before launch capital moves.
+    if (!this.options.dryRun) {
+      const mint = await retry(
+        () => this.ctx.rpc.accountInfo(report.mint),
+        { retries: 5, backoffMs: 1_000, label: 'verify-mint' },
+      );
+      if (!mint) {
+        throw new Error(`creation reported mint ${report.mint} but the account was not found on-chain`);
+      }
+    }
+
+    return {
+      stage: 'creation',
+      success: true,
+      message: `Mint created: ${report.mint}`,
+      data: {
+        mint: report.mint,
+        keepFreezeAuthority: this.config.keepFreezeAuthority,
+      },
+    };
+  }
 
   /**
    * Stage 1: Pre-launch setup.

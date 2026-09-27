@@ -101,6 +101,13 @@ async function runControllerLifecycle(
     tokenSupplyRaw: BigInt(cfg.create.totalSupplyRaw),
     metadataUri: cfg.create.metadataUri,
     tokenProgram: cfg.create.tokenProgram,
+    // Creation: deploy the mint inside the lifecycle when enabled. Freeze
+    // authority retention follows the create-stage extension so the freeze
+    // stage can act on the mint it just created.
+    createTokenEnabled: cfg.create.enabled,
+    keepMintAuthority: false,
+    keepFreezeAuthority: cfg.create.extensions?.freezeAuthority ?? true,
+    revokeMetadataAuthority: true,
 
     // Launch configuration
     launchVenue: (cfg.launch.launchpad === 'raydium-amm-v4' ? 'raydium' : cfg.launch.launchpad) as never,
