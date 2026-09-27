@@ -8,11 +8,19 @@
  * @module
  */
 
+import { PublicKey } from '@solana/web3.js';
 import type { MonitorEvent, PriorityFeeSample } from '@solana-toolkit/types';
 import { moduleLogger } from '@solana-toolkit/utils';
 import { SubscriptionManager } from '@solana-toolkit/rpc-client';
 import type { DexContext } from './context.js';
-import { decodeBondingCurve, pumpBondingCurvePda, PROGRAMS } from '@solana-toolkit/solana-programs';
+import {
+  decodeBondingCurve,
+  decodePumpSwapPool,
+  pumpAmmPoolPda,
+  pumpBondingCurvePda,
+  PROGRAMS,
+  WSOL_MINT,
+} from '@solana-toolkit/solana-programs';
 
 const log = moduleLogger('monitor');
 
@@ -29,6 +37,75 @@ export interface CurveSnapshot {
 }
 
 /**
+ * Pull-based price read (no WebSocket): reads on-chain state through
+ * ctx.rpc, so every call inherits the SolanaRpcClient failover pool and
+ * the retry layer — unlike `watchPumpfunCurve`, whose subscription binds to
+ * a single endpoint.
+ *
+ * MINT PATH HANDLING, kept clearly separated:
+ *   - PATH 1 (pre-graduation): the Pump.fun bonding curve PDA holds virtual
+ *     reserves; price = virtualSOL / virtualToken (lamports per raw token,
+ *     scaled to SOL per whole token).
+ *   - PATH 2 (post-graduation): the curve account is gone; the migrated
+ *     PumpSwap pool's vault balances give the price instead.
+ * Returns null when neither venue has state for the mint.
+ */
+export async function readCurvePrice(
+  ctx: DexContext,
+  mint: string,
+): Promise<CurveSnapshot | null> {
+  const capturedAt = new Date().toISOString();
+
+  // --- PATH 1: Pump.fun bonding curve (pre-graduation) ---
+  const curvePda = pumpBondingCurvePda(mint);
+  const curveInfo = await ctx.rpc.accountInfo(curvePda.toBase58());
+  if (curveInfo) {
+    const curve = decodeBondingCurve(Buffer.from(curveInfo.data));
+    const price = (Number(curve.virtualSolReserves) / Number(curve.virtualTokenReserves)) * 1e9;
+    return {
+      mint,
+      virtualTokenReserves: curve.virtualTokenReserves.toString(),
+      virtualSolReserves: curve.virtualSolReserves.toString(),
+      realTokenReserves: curve.realTokenReserves.toString(),
+      realSolReserves: curve.realSolReserves.toString(),
+      complete: curve.complete,
+      priceSolPerToken: price,
+      capturedAt,
+    };
+  }
+
+  // --- PATH 2: PumpSwap pool (post-graduation) ---
+  const poolPda = pumpAmmPoolPda({
+    index: 0,
+    creator: '11111111111111111111111111111111',
+    baseMint: mint,
+    quoteMint: WSOL_MINT,
+  });
+  const poolInfo = await ctx.rpc.accountInfo(poolPda.toBase58());
+  if (!poolInfo) return null;
+  const pool = decodePumpSwapPool(Buffer.from(poolInfo.data));
+  const [baseVault, quoteVault] = await Promise.all([
+    ctx.rpc.connection.getTokenAccountBalance(new PublicKey(pool.poolBaseTokenAccount)).catch(() => null),
+    ctx.rpc.connection.getTokenAccountBalance(new PublicKey(pool.poolQuoteTokenAccount)).catch(() => null),
+  ]);
+  if (!baseVault || !quoteVault) return null;
+  const baseReserves = BigInt(baseVault.value.amount);
+  const quoteReserves = BigInt(quoteVault.value.amount);
+  if (baseReserves === 0n) return null;
+  const price = (Number(quoteReserves) / Number(baseReserves)) * 1e9;
+  return {
+    mint,
+    virtualTokenReserves: baseReserves.toString(),
+    virtualSolReserves: quoteReserves.toString(),
+    realTokenReserves: baseReserves.toString(),
+    realSolReserves: quoteReserves.toString(),
+    complete: true,
+    priceSolPerToken: price,
+    capturedAt,
+  };
+}
+
+/**
  * Subscribes to a bonding curve account and calls `onChange` with a decoded
  * snapshot after every update.
  */
@@ -36,8 +113,7 @@ export async function watchPumpfunCurve(
   ctx: DexContext,
   mint: string,
   onChange: (snapshot: CurveSnapshot) => void,
-): Promise<{ unsubscribe: () => Promise<void>; latest: () => CurveSnapshot | null }> {
-  const subs = new SubscriptionManager(ctx.rpc);
+): Promise<{ unsubscribe: () => Promise<void>; latest: () => CurveSnapshot | null }> {  const subs = new SubscriptionManager(ctx.rpc);
   let latest: CurveSnapshot | null = null;
   const curvePda = pumpBondingCurvePda(mint);
   const sub = await subs.subscribeAccount(curvePda.toBase58(), async (ev) => {

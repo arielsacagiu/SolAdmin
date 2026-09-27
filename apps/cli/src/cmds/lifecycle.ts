@@ -42,12 +42,22 @@ export function registerLifecycleCommand(program: Command): void {
     .option('--use-controller', 'use the new controller-based lifecycle manager')
     .option('--dry-run', 'run in dry-run mode (simulate all operations)')
     .option('--anonymity <level>', 'anonymity level: default | strict | minimal')
+    .option('--keystore-dir <dir>', 'persist generated launch wallets as encrypted keystores under this directory (defaults to the config buyerKeystoreDir)')
+    .option('--continuous', 'run the lifecycle in a continuous outer loop (fresh launch per iteration)')
+    .option('--max-restarts <n>', 'maximum restarts in continuous mode; 0 = unlimited (default: 0)')
+    .option('--restart-delay-ms <ms>', 'delay between continuous iterations in ms (default: 30000)')
+    .option('--restart-on-success', 'restart even after successful iterations')
     .action(async (opts: GlobalOptions & {
       config: string;
       stage?: string;
       useController?: boolean;
       dryRun?: boolean;
       anonymity?: string;
+      keystoreDir?: string;
+      continuous?: boolean;
+      maxRestarts?: string;
+      restartDelayMs?: string;
+      restartOnSuccess?: boolean;
     }) => {
       const cfg = parseConfigFile<LifecycleConfig>(opts.config);
       assertLifecycleConfigShape(cfg);
@@ -75,6 +85,11 @@ async function runControllerLifecycle(
     useController?: boolean;
     dryRun?: boolean;
     anonymity?: string;
+    keystoreDir?: string;
+    continuous?: boolean;
+    maxRestarts?: string;
+    restartDelayMs?: string;
+    restartOnSuccess?: boolean;
   },
   cfg: LifecycleConfig,
 ): Promise<void> {
@@ -142,6 +157,18 @@ async function runControllerLifecycle(
   // treasury the controller generates (fresh treasuries start at 0 SOL).
   const treasuryFunder = await loadWallet(cfg.treasuryKeystore);
 
+  // Persistence (Gap 3): all generated wallets (treasury, buyers, relays,
+  // MM/txn wallets, exit relays) are stored as encrypted keystores under
+  // the keystore directory, one subdirectory per launch. Defaults to the
+  // config's buyerKeystoreDir so the controller path matches the legacy one.
+  const keystoreDir = opts.keystoreDir ?? cfg.buyerKeystoreDir;
+  const keystorePassword = process.env['SOLADMIN_KEYSTORE_PASSWORD'] ?? 'change-me';
+
+  // Continuous outer loop (Gap 4): omitted flags keep the original
+  // single-pass behavior.
+  const maxRestarts = opts.maxRestarts !== undefined ? Number(opts.maxRestarts) : 0;
+  const restartDelayMs = opts.restartDelayMs !== undefined ? Number(opts.restartDelayMs) : 30_000;
+
   // Create and run the controller
   const controller = new LifecycleController({
     ctx: services,
@@ -149,6 +176,14 @@ async function runControllerLifecycle(
     dryRun: opts.dryRun ?? forcedSimulate,
     anonymityConfig: anonymityConfig as AnonymityConfig,
     treasuryFunder,
+    keystoreDir,
+    keystorePassword,
+    continuous: {
+      enabled: opts.continuous ?? false,
+      maxRestarts,
+      restartDelayMs,
+      restartOnSuccess: opts.restartOnSuccess ?? false,
+    },
   });
 
   const result: LifecycleResult = await controller.start();
@@ -165,6 +200,7 @@ async function runControllerLifecycle(
     success: result.success,
     durationMs: result.durationMs,
     mintAddress: result.mintAddress,
+    keystoreDir,
     errors: result.errors.map(e => e.message),
     warnings: result.errors.length > 0 ? ['Check error logs for details'] : [],
   };

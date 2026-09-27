@@ -34,6 +34,13 @@ export interface JitoConfig {
   blockEngineUrl: string;
   /** Tip attached to the final transaction of each bundle, in lamports. */
   tipLamports: number;
+  /**
+   * Jitter applied to the bundle tip in basis points (±). When set (> 0),
+   * every bundle's tip is drawn from ±tipJitterBps of the configured value
+   * using the CSPRNG — identical tip values across bundles are a strong
+   * same-operator signal. Default: 0 (off) preserving exact-tip behavior.
+   */
+  tipJitterBps?: number;
   /** Relay single transactions through /api/v1/transactions. */
   relaySingleTxs: boolean;
   /** Timeout in ms for bundle status polling. */

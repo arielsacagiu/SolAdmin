@@ -21,6 +21,7 @@ import {
   type BlockhashWithExpiryBlockHeight,
   type Signer,
 } from '@solana/web3.js';
+import { randomBytes } from 'node:crypto';
 import type {
   PriorityFeeConfig,
   SafetyConfig,
@@ -41,6 +42,19 @@ const log = moduleLogger('sender');
 
 /** Jito hard limit on transactions per bundle (docs.jito.wtf). */
 const JITO_BUNDLE_MAX_TXS = 5;
+
+/**
+ * Jitters a Jito bundle tip within ±jitterBps using the CSPRNG.
+ * Returns the exact tip when jitterBps is 0 (default configuration).
+ * Exported for unit tests.
+ */
+export function jitterTip(baseLamports: bigint, jitterBps: number): bigint {
+  if (jitterBps <= 0 || baseLamports <= 0n) return baseLamports;
+  const draw = randomBytes(6).readUIntBE(0, 6) / 2 ** 48; // [0,1)
+  const deviation = BigInt(Math.floor(draw * (jitterBps * 2 + 1))) - BigInt(jitterBps);
+  const jittered = baseLamports + (baseLamports * deviation) / 10_000n;
+  return jittered > 0n ? jittered : baseLamports;
+}
 
 /** What a service wants to send. The sender handles the rest. */
 export interface TransactionRequest {
@@ -264,9 +278,14 @@ export class TransactionSender {
     // final leg's transaction when possible. A standalone tip transaction is
     // only appended when the last request carries its own inline tip already
     // (so the bundle has at least one tip either way).
-    const tipLamports = BigInt(
+    const configuredTip = BigInt(
       (opts.priorityFee?.jitoTipLamports ?? this.jito.config.tipLamports),
     );
+    // Anti-correlation: jitter the tip when configured. Identical tip values
+    // across a session's bundles are a same-operator fingerprint; a ±jitter
+    // draw from the CSPRNG removes it. Explicit per-call tips are jittered
+    // too — they are constants repeated across calls by every caller.
+    const tipLamports = jitterTip(configuredTip, this.jito.config.tipJitterBps ?? 0);
     if (tipLamports < JITO_MIN_TIP_LAMPORTS) {
       warnings.push(
         `tip ${tipLamports} lamports is below Jito's enforced minimum of ${JITO_MIN_TIP_LAMPORTS}; the bundle will likely be dropped`,

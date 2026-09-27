@@ -34,6 +34,7 @@ import {
   increaseTransactions,
   freshLaunchLineage,
   freshBuyerWallets,
+  readCurvePrice,
   type DexContext,
 } from '@solana-toolkit/dex';
 import {
@@ -43,8 +44,13 @@ import {
 import { scanTokenHolders } from './holders.js';
 import {
   createAnonymizedLaunchConfig,
+  createCryptoRng,
   fundBuyersAnonymously,
+  getPersistentRegistry,
+  DEFAULT_ANTI_CORRELATION_CONFIG,
   type AnonymityConfig,
+  type AntiCorrelationConfig,
+  type PersistentWalletRegistry,
   DEFAULT_ANONYMITY_CONFIG,
 } from './anonymity.js';
 import { SocialPromotionManager, type SocialPromotionConfig } from './social-promotion.js';
@@ -267,6 +273,30 @@ export const DEFAULT_LIFECYCLE_CONFIG: Partial<LifecycleConfig> = {
 };
 
 /**
+ * Continuous lifecycle (outer loop) options.
+ *
+ * By default `start()` runs a single pass and returns. With `enabled: true`
+ * the controller loops: each iteration is a complete launch lifecycle, after
+ * which the controller waits `restartDelayMs` and runs a fresh one (fresh
+ * mint when creation is enabled, fresh lineage always) until `maxRestarts`
+ * is exhausted or `stop()` is called.
+ */
+export interface ContinuousLifecycleOptions {
+  /** Run the lifecycle loop instead of a single pass (default: false). */
+  enabled?: boolean;
+  /** Delay between lifecycle iterations in ms (default: 30_000). */
+  restartDelayMs?: number;
+  /**
+   * Maximum number of restarts per start() call. 0 means unlimited
+   * (default: 0). The initial pass is not counted as a restart.
+   */
+  maxRestarts?: number;
+  /** Restart even after a successful iteration (default: false — restart
+   *  only on failure). */
+  restartOnSuccess?: boolean;
+}
+
+/**
  * Lifecycle controller options.
  */
 export interface LifecycleControllerOptions {
@@ -278,6 +308,17 @@ export interface LifecycleControllerOptions {
   dryRun?: boolean;
   /** Custom anonymity configuration override. */
   anonymityConfig?: AnonymityConfig;
+  /**
+   * Anti-correlation overrides (CSPRNG draws, relay-mediated funding,
+   * persistent reuse registry). Defaults from DEFAULT_ANTI_CORRELATION_CONFIG.
+   */
+  antiCorrelationConfig?: Partial<AntiCorrelationConfig>;
+  /**
+   * Location of the persistent wallet reuse registry (cross-launch address
+   * reuse detection). When unset and keystoreDir is configured, the registry
+   * defaults to `<keystoreDir>/wallet-registry.json`.
+   */
+  walletRegistryPath?: string;
   /**
    * Persistent root wallet that tops up every fresh (rotated) treasury before
    * its buyers are funded. Fresh treasuries start at zero SOL; without a
@@ -301,10 +342,17 @@ export interface LifecycleControllerOptions {
   profitWallet?: Keypair;
   /**
    * The mint's actual freeze authority keypair, required for the freeze
-   * stage to succeed. When omitted the freeze stage reports itself skipped
-   * instead of sending transactions a fresh keypair cannot authorize.
+   * stage to succeed. When the controller creates the mint itself with
+   * `keepFreezeAuthority: true`, the creation payer (treasuryFunder) IS the
+   * retained freeze authority and is wired automatically — this option is
+   * only needed for externally created mints.
    */
   freezeAuthority?: Keypair;
+  /**
+   * Continuous (outer loop) configuration. Omitted: single pass, preserving
+   * the original start() contract.
+   */
+  continuous?: ContinuousLifecycleOptions;
 }
 
 /**
@@ -368,6 +416,30 @@ export class LifecycleController {
   private errors: Error[] = [];
   private mintAddress: string | undefined;
 
+  // --- Anti-correlation / persistence state (Gaps 3+5) ---
+  /** Persistent cross-launch wallet reuse registry (null when disabled). */
+  private walletRegistry: PersistentWalletRegistry | null = null;
+  /** Launch lineage generated (and persisted) in pre-launch, reused by launch. */
+  private launchLineage: {
+    treasury: Keypair;
+    buyers: Keypair[];
+    relays: Keypair[];
+  } | null = null;
+  /**
+   * Freeze authority recorded when the controller created the mint with
+   * `keepFreezeAuthority: true` (the creation payer). Auto-wires the freeze
+   * stage without requiring options.freezeAuthority for internal creations.
+   */
+  private createdFreezeAuthority: Keypair | null = null;
+
+  // --- Price telemetry state (Gap 2) ---
+  /** Background price poll timer (unref'd; never holds the process open). */
+  private pricePollTimer: ReturnType<typeof setInterval> | null = null;
+
+  // --- Outer loop state (Gap 4) ---
+  /** Number of completed lifecycle iterations in the current start() call. */
+  private iterations = 0;
+
   constructor(options: LifecycleControllerOptions) {
     this.ctx = options.ctx;
     this.options = options;
@@ -403,6 +475,48 @@ export class LifecycleController {
       ...DEFAULT_ANONYMITY_CONFIG,
       ...(this.options.anonymityConfig ?? this.config.anonymityConfig ?? {}),
     };
+  }
+
+  /**
+   * Resolved anti-correlation configuration (CSPRNG draws, relay-mediated
+   * funding with distinct feePayers, persistent reuse registry).
+   */
+  private get antiCorrelation(): AntiCorrelationConfig {
+    return {
+      ...DEFAULT_ANTI_CORRELATION_CONFIG,
+      ...(this.options.antiCorrelationConfig ?? {}),
+    };
+  }
+
+  /**
+   * The persistent wallet reuse registry, lazily created at the path from
+   * options.walletRegistryPath (defaulting under keystoreDir). Null when
+   * persistence is disabled — callers must null-check.
+   */
+  private get registry(): PersistentWalletRegistry | null {
+    if (this.walletRegistry) return this.walletRegistry;
+    const ac = this.antiCorrelation;
+    if (!ac.persistRegistry) return null;
+    const registryPath =
+      this.options.walletRegistryPath ??
+      (this.options.keystoreDir
+        ? path.join(this.options.keystoreDir, 'wallet-registry.json')
+        : null);
+    if (!registryPath) {
+      log.warn('persistRegistry enabled but no registry path resolvable — reuse detection disabled');
+      return null;
+    }
+    this.walletRegistry = getPersistentRegistry(registryPath, ac.maxWalletAgeMs);
+    return this.walletRegistry;
+  }
+
+  /**
+   * Effective freeze authority for the freeze stage: the explicitly
+   * configured keypair when provided, otherwise the authority the creation
+   * stage retained when it created the mint itself (the creation payer).
+   */
+  private get effectiveFreezeAuthority(): Keypair | undefined {
+    return this.options.freezeAuthority ?? this.createdFreezeAuthority ?? undefined;
   }
 
   /**
@@ -485,10 +599,91 @@ export class LifecycleController {
   }
 
   /**
-   * Start the full lifecycle execution.
-   * Runs all stages in sequence with proper error handling.
+   * Best-effort price refresh via the pull-based reader (ctx.rpc, so the
+   * call rides the failover pool). Telemetry failure never fails a stage —
+   * the last good price stays and triggers fall back to the timeout/holder
+   * conditions.
+   */
+  private async refreshPrice(): Promise<void> {
+    if (!this.monitorData) return;
+    const mint = this.mintAddress || this.config.mint;
+    if (!mint) return;
+    try {
+      const snap = await readCurvePrice(this.ctx as unknown as DexContext, mint);
+      if (snap && snap.priceSolPerToken > 0) {
+        this.monitorData.currentPrice = snap.priceSolPerToken;
+        this.monitorData.lastUpdated = Date.now();
+        this.monitorData.priceHistory.push({
+          timestamp: Date.now(),
+          price: snap.priceSolPerToken,
+        });
+        // Cap history so long monitoring loops don't grow unbounded.
+        if (this.monitorData.priceHistory.length > 1_000) {
+          this.monitorData.priceHistory.shift();
+        }
+      }
+    } catch (err) {
+      log.warn({ err }, 'price refresh failed — keeping last price (RPC failover will rotate)');
+    }
+  }
+
+  /**
+   * Starts the background price poller (Gap 2 telemetry).
    *
-   * @returns Complete lifecycle result with all stage outcomes
+   * `executeMonitoring` already refreshes the price on its own tick, but
+   * only while the monitoring stage is active: during launch, market-making
+   * and txn generation the monitor data goes stale, and the stale-price
+   * guard in `checkExitConditions` then sidelines take-profit/stop-loss.
+   * This poller keeps `monitorData` fresh across ALL post-launch stages so
+   * exit triggers react to real venue data whenever they are evaluated.
+   *
+   * Every tick goes through `refreshPrice` → `ctx.rpc` → the failover pool,
+   * so an endpoint outage rotates instead of killing the poller. The timer
+   * is unref'd: it never keeps the process alive on its own.
+   */
+  private startPricePolling(): void {
+    if (this.pricePollTimer) return;
+    const mint = this.mintAddress || this.config.mint;
+    if (!mint) {
+      log.warn('price polling not started: no mint address available');
+      return;
+    }
+    const intervalMs = Math.max(1_000, this.config.monitorIntervalMs || 10_000);
+    const tick = () => {
+      void this.refreshPrice().catch((err) => {
+        log.warn({ err }, 'price poll tick failed');
+      });
+    };
+    tick();
+    const timer = setInterval(tick, intervalMs);
+    // Never hold the event loop open just for telemetry.
+    (timer as { unref?: () => void }).unref?.();
+    this.pricePollTimer = timer;
+    log.info({ mint, intervalMs }, 'background price polling started');
+  }
+
+  /** Stops the background price poller (idempotent). */
+  private stopPricePolling(): void {
+    if (!this.pricePollTimer) return;
+    clearInterval(this.pricePollTimer);
+    this.pricePollTimer = null;
+    log.info('background price polling stopped');
+  }
+
+  /**
+   * Start the lifecycle execution.
+   *
+   * Single-pass mode (default): runs all stages once and returns — the
+   * original contract, preserved for every existing caller.
+   *
+   * Continuous mode (`options.continuous.enabled`): outer loop. Each
+   * iteration is a COMPLETE launch lifecycle (fresh mint when creation is
+   * enabled, fresh persisted lineage always); after each iteration the
+   * controller waits `restartDelayMs` and runs the next, until `maxRestarts`
+   * is exhausted, `stop()` is called, or an iteration succeeded with
+   * `restartOnSuccess` false (the default — only failed launches restart).
+   *
+   * @returns Complete lifecycle result (last iteration in continuous mode)
    */
   async start(): Promise<LifecycleResult> {
     if (this.running) {
@@ -498,11 +693,83 @@ export class LifecycleController {
     this.running = true;
     this.stopped = false;
     this.startedAt = Date.now();
-    this.errors = [];
+    this.iterations = 0;
 
+    const cont = this.options.continuous;
+    const isContinuous = cont?.enabled === true;
+    const restartDelayMs = cont?.restartDelayMs ?? 30_000;
+    const maxRestarts = cont?.maxRestarts ?? 0; // 0 = unlimited
+    const restartOnSuccess = cont?.restartOnSuccess ?? false;
+
+    if (isContinuous) {
+      log.info(
+        { restartDelayMs, maxRestarts, restartOnSuccess },
+        'continuous lifecycle mode enabled — outer loop active',
+      );
+    }
+
+    try {
+      let result = await this.runOnce();
+
+      if (!isContinuous) {
+        return result;
+      }
+
+      // Outer loop: keep launching until stopped, out of restarts, or a
+      // successful iteration (when restartOnSuccess is false).
+      let restarts = 0;
+      while (!this.stopped) {
+        const shouldRestart = restartOnSuccess || !result.success;
+        if (!shouldRestart) {
+          log.info('iteration succeeded and restartOnSuccess is false — outer loop exiting');
+          break;
+        }
+        if (maxRestarts > 0 && restarts >= maxRestarts) {
+          log.info({ restarts, maxRestarts }, 'maximum restarts reached — outer loop exiting');
+          break;
+        }
+        restarts++;
+        log.info(
+          { nextIteration: this.iterations + 1, delayMs: restartDelayMs, lastSuccess: result.success },
+          'outer loop: preparing next lifecycle iteration',
+        );
+        await sleep(restartDelayMs);
+        if (this.stopped) break;
+        result = await this.runOnce();
+      }
+
+      return result;
+
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.errors.push(error);
+      this.currentStage = 'error';
+
+      log.error(
+        { err: error, stage: this.currentStage },
+        'lifecycle failed',
+      );
+
+      return this.buildResult();
+
+    } finally {
+      this.running = false;
+      this.stopPricePolling();
+    }
+  }
+
+  /**
+   * Resets per-iteration state and runs one complete lifecycle pass.
+   * Each iteration is an isolated launch: fresh results/errors/monitor
+   * data, fresh lineage, and a fresh mint whenever the controller is
+   * responsible for creation (an explicitly configured mint is reused).
+   */
+  private async runOnce(): Promise<LifecycleResult> {
+    this.resetForIteration();
+    this.iterations++;
     log.info(
-      { token: this.config.tokenSymbol, dryRun: this.options.dryRun },
-      'lifecycle started',
+      { token: this.config.tokenSymbol, dryRun: this.options.dryRun, iteration: this.iterations },
+      'lifecycle iteration started',
     );
 
     try {
@@ -546,38 +813,61 @@ export class LifecycleController {
       // Stage 9: Consolidation
       await this.runStage('consolidation', this.executeConsolidation.bind(this));
 
+      // The lifecycle pass is over: the price poller has nothing left to feed.
+      this.stopPricePolling();
+
       this.currentStage = 'complete';
       log.info(
-        { results: this.results.length, durationMs: Date.now() - this.startedAt },
-        'lifecycle completed successfully',
+        { results: this.results.length, durationMs: Date.now() - this.startedAt, iteration: this.iterations },
+        'lifecycle iteration completed successfully',
       );
 
       return this.buildResult();
 
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      this.errors.push(error);
       this.currentStage = 'error';
 
       log.error(
-        { err: error, stage: this.currentStage },
-        'lifecycle failed',
+        { err: error, stage: this.currentStage, iteration: this.iterations },
+        'lifecycle iteration failed',
       );
 
       return this.buildResult();
+    }
+  }
 
-    } finally {
-      this.running = false;
+  /**
+   * Resets all per-iteration state so the next iteration starts clean:
+   * fresh stage results, fresh monitor data (entry price re-captured at the
+   * next launch), fresh lineage, and a fresh mint when the controller
+   * creates it. An explicitly configured `config.mint` is reused as-is.
+   */
+  private resetForIteration(): void {
+    this.results = [];
+    this.errors = [];
+    this.currentStage = 'creation';
+    this.monitorData = null;
+    this.stopPricePolling();
+    this.launchLineage = null;
+    this.startedAt = Date.now();
+    if (this.config.createTokenEnabled) {
+      this.mintAddress = undefined;
+      this.createdFreezeAuthority = null;
+    } else {
+      this.mintAddress = this.config.mint;
     }
   }
 
   /**
    * Stop the lifecycle execution gracefully.
-   * Stops at the next stage boundary.
+   * Stops at the next stage boundary and halts the continuous outer loop
+   * at the next iteration boundary.
    */
   stop(): void {
     log.info('lifecycle stop requested');
     this.stopped = true;
+    this.stopPricePolling();
   }
 
   /**
@@ -708,6 +998,18 @@ export class LifecycleController {
 
     this.setMintAddress(report.mint);
 
+    // Gap 1 wiring: when this controller created the mint and retained the
+    // freeze authority, the creation payer IS that authority. Record it so
+    // the freeze stage (autoFreezeAllHolders) can sign without requiring
+    // the operator to pass options.freezeAuthority for internal creations.
+    if (this.config.keepFreezeAuthority) {
+      this.createdFreezeAuthority = this.options.treasuryFunder;
+      log.info(
+        { mint: report.mint, freezeAuthority: this.createdFreezeAuthority.publicKey.toBase58().slice(0, 6) },
+        'freeze authority auto-wired from creation payer',
+      );
+    }
+
     // Post-creation verification through the failover pool: confirm the
     // mint account exists before launch capital moves.
     if (!this.options.dryRun) {
@@ -761,23 +1063,48 @@ export class LifecycleController {
       };
     }
 
-    // Generate anonymized launch configuration if mint doesn't exist
-    if (!this.mintAddress) {
+    // Generate the launch lineage ONCE here (treasury + buyers + relays),
+    // persist it immediately (fail-closed, before any funding), and keep it
+    // for the launch stage — which previously generated a DIFFERENT lineage,
+    // leaving the pre-launch wallets transient and the persisted set out of
+    // sync with the wallets that actually traded.
+    if (!this.launchLineage) {
       const launchConfig = createAnonymizedLaunchConfig(
         this.config.buyerWalletCount,
         this.config.relayWalletCount,
         this.anonymity,
       );
+      this.launchLineage = {
+        treasury: launchConfig.treasury,
+        buyers: launchConfig.buyerWallets,
+        relays: launchConfig.relayWallets,
+      };
 
-      // Store the treasury and wallets for later stages
-      // In a real implementation, these would be persisted to the context
+      // FAIL-CLOSED persistence: a persistence error aborts the stage
+      // BEFORE any SOL moves — losing the key of a wallet that is about to
+      // hold funds is unrecoverable, while regenerating unfunded wallets
+      // costs nothing.
+      this.persistLineage('treasury', [launchConfig.treasury]);
+      this.persistLineage('buyer', launchConfig.buyerWallets);
+      this.persistLineage('relay', launchConfig.relayWallets);
+
+      // Register the fresh treasury in the persistent reuse registry so no
+      // future launch (even after a process restart) ever reuses it.
+      this.registry?.register('treasury', launchConfig.treasury.publicKey.toBase58());
+      for (const buyer of launchConfig.buyerWallets) {
+        this.registry?.register('buyer', buyer.publicKey.toBase58());
+      }
+      for (const relay of launchConfig.relayWallets) {
+        this.registry?.register('relay', relay.publicKey.toBase58());
+      }
+
       log.info(
         {
           treasury: launchConfig.treasury.publicKey.toBase58().slice(0, 6),
           buyers: launchConfig.buyerWallets.length,
           relays: launchConfig.relayWallets.length,
         },
-        'generated fresh launch lineage',
+        'generated and persisted launch lineage',
       );
     }
 
@@ -812,32 +1139,44 @@ export class LifecycleController {
   private async executeLaunch(): Promise<StageResult> {
     log.info('executing launch phase');
 
-    // Generate fresh launch lineage (treasury + buyers)
-    const lineage = freshLaunchLineage(this.config.buyerWalletCount);
-
-    // 1. PERSIST first — keys survive process death even if funding or later
-    //    stages fail (fail-closed: a persistence error aborts the stage
-    //    before any SOL moves).
-    this.persistLineage('treasury', [lineage.treasury]);
-    this.persistLineage('buyer', lineage.buyers);
+    // Reuse the lineage the pre-launch stage generated and persisted. When
+    // pre-launch was skipped (single-stage runs), generate and persist one
+    // here so no launched wallet is ever unpersisted.
+    if (!this.launchLineage) {
+      const fresh = freshLaunchLineage(this.config.buyerWalletCount);
+      this.persistLineage('treasury', [fresh.treasury]);
+      this.persistLineage('buyer', fresh.buyers);
+      this.registry?.register('treasury', fresh.treasury.publicKey.toBase58());
+      this.launchLineage = { treasury: fresh.treasury, buyers: fresh.buyers, relays: [] };
+      log.warn('launch stage generated its own lineage — pre-launch stage did not run');
+    }
+    const lineage = this.launchLineage;
 
     // Fund the fresh treasury from the persistent root wallet first: it
     // starts at zero SOL, and every buyer-funding transfer below draws from
     // it. Total = per-buyer funding (with fee headroom) for all buyers, plus
     // per-transfer fee allowance and a buffer for the treasury's own fees.
+    // Relay-mediated funding (antiCorrelation.breakFundingGraph) adds one
+    // relay fee overhead per buyer — include it in the treasury top-up.
+    const ac = this.antiCorrelation;
     const buyerCount = BigInt(this.config.buyerWalletCount);
-    const perBuyerFunding = this.config.buyLamportsPerWallet + 50_000n;
+    const relayOverhead = ac.breakFundingGraph ? 15_000n : 0n;
+    const perBuyerFunding = this.config.buyLamportsPerWallet + 50_000n + relayOverhead;
     const treasuryFunding = buyerCount * (perBuyerFunding + 10_000n) + 50_000n;
     await this.fundTreasury(lineage.treasury, treasuryFunding);
 
     // Pre-fund all buyer wallets from the funded treasury with randomized
-    // amounts/delays (anonymity suite).
+    // amounts/delays (anonymity suite) and anti-correlation measures:
+    // CSPRNG draws, relay-mediated funding with distinct feePayers, and
+    // persistent reuse checks.
     const fundResult = await fundBuyersAnonymously({
       ctx: this.ctx,
       treasury: lineage.treasury,
       buyers: lineage.buyers,
       lamportsPerBuyer: this.config.buyLamportsPerWallet + 50_000n,
       anonymity: this.anonymity,
+      antiCorrelation: this.options.antiCorrelationConfig ?? ac,
+      registry: this.registry ?? undefined,
       mode: this.options.dryRun ? 'simulate' : 'execute',
     });
 
@@ -862,6 +1201,8 @@ export class LifecycleController {
       slippageBps: this.config.slippageBps,
       mode: this.options.dryRun ? 'simulate' : 'execute',
       interBuyerDelayMs: this.anonymity.maxInterBuyerDelayMs,
+      // CSPRNG for the inter-buyer purchase timing (anti-correlation).
+      rng: ac.cryptoRng ? createCryptoRng() : undefined,
       preFundBuyers: false,
     });
 
@@ -876,6 +1217,22 @@ export class LifecycleController {
         count: successfulBuyers,
       });
     }
+
+    // Entry-price plumbing: the buys moved the curve, so the first post-
+    // launch reading is the operator's actual cost basis — not the pre-
+    // launch price. This is what makes take-profit/stop-loss meaningful.
+    await this.refreshPrice();
+    if (this.monitorData && this.monitorData.currentPrice > 0) {
+      this.monitorData.entryPrice = this.monitorData.currentPrice;
+      log.info(
+        { entryPrice: this.monitorData.entryPrice, currentPrice: this.monitorData.currentPrice },
+        'entry price captured from first post-launch reading',
+      );
+    }
+
+    // Keep telemetry live across all subsequent stages (market-making,
+    // txn generation, monitoring) so exit triggers always see fresh prices.
+    this.startPricePolling();
 
     return {
       stage: 'launch',
@@ -917,6 +1274,8 @@ export class LifecycleController {
       buyers: mmLineage.buyers,
       lamportsPerBuyer: this.config.mmBuyAmountRaw + 50_000n,
       anonymity: this.anonymity,
+      antiCorrelation: this.options.antiCorrelationConfig ?? this.antiCorrelation,
+      registry: this.registry ?? undefined,
       mode: this.options.dryRun ? 'simulate' : 'execute',
     });
 
@@ -978,6 +1337,8 @@ export class LifecycleController {
       buyers: txnWallets,
       lamportsPerBuyer: this.config.txnAmountRaw + 50_000n,
       anonymity: this.anonymity,
+      antiCorrelation: this.options.antiCorrelationConfig ?? this.antiCorrelation,
+      registry: this.registry ?? undefined,
       mode: this.options.dryRun ? 'simulate' : 'execute',
     });
 
@@ -1040,8 +1401,11 @@ export class LifecycleController {
         break;
       }
 
+      // Telemetry: refresh the price every tick so take-profit/stop-loss
+      // react to real venue data (pull-based read through the failover pool).
+      await this.refreshPrice();
+
       // Check if we should exit based on price conditions
-      // (In practice, would check actual price from venue)
       const shouldExit = this.checkExitConditions(elapsed);
       if (shouldExit) {
         log.info('exit conditions met during monitoring');
@@ -1108,8 +1472,16 @@ export class LifecycleController {
       return true;
     }
 
-    // Take profit condition (would need actual price tracking)
-    // This is a placeholder - real implementation would track price from venue
+    // Stale-price guard: if the last reading is older than three monitor
+    // intervals, price triggers stay on the sidelines — never fire
+    // take-profit on an old high (or stop-loss on an old low). Only the
+    // timeout condition above remains active in that case.
+    const priceIsFresh =
+      this.monitorData.lastUpdated > Date.now() - this.config.monitorIntervalMs * 3;
+    if (!priceIsFresh) return false;
+
+    // Take profit condition (entry price captured at the end of the launch
+    // stage; currentPrice refreshed every monitor tick).
     if (this.config.takeProfitMultiplier > 0 && this.monitorData.currentPrice > 0) {
       const entryPrice = this.monitorData.entryPrice || this.monitorData.currentPrice;
       if (this.monitorData.currentPrice >= entryPrice * this.config.takeProfitMultiplier) {
@@ -1134,6 +1506,7 @@ export class LifecycleController {
    */
   private async executeFreeze(): Promise<StageResult> {
     log.info('executing freeze phase');
+    const mint = this.mintAddress || this.config.mint || '';
 
     // Check if we should freeze
     const holders = await this.scanAndUpdateHolders();
@@ -1147,12 +1520,13 @@ export class LifecycleController {
     }
 
     // The freeze stage must sign with the mint's ACTUAL freeze authority
-    // keypair — a freshly generated keypair cannot authorize freezes and
-    // every transaction would fail. Without one configured the stage reports
+    // keypair — either explicitly configured (external mints) or the one
+    // the creation stage retained when this controller created the mint
+    // (auto-wired in executeCreation). Without either, the stage reports
     // itself skipped instead of sending doomed transactions.
-    const freezeAuthority = this.options.freezeAuthority;
+    const freezeAuthority = this.effectiveFreezeAuthority;
     if (!freezeAuthority) {
-      log.warn('no freezeAuthority configured — freeze stage skipped (pass options.freezeAuthority to enable)');
+      log.warn('no freeze authority configured or auto-wired — freeze stage skipped');
       return {
         stage: 'freeze',
         success: true,
@@ -1163,15 +1537,17 @@ export class LifecycleController {
 
     const result = await autoFreezeAllHolders(this.ctx, {
       authority: freezeAuthority,
-      mint: this.mintAddress || this.config.mint || '',
+      mint,
       mode: this.options.dryRun ? 'simulate' : 'execute',
     });
 
-    // Optionally revoke all authorities after freeze
-    if (this.config.revokeAuthoritiesAfterFreeze && this.config.mint) {
+    // Optionally revoke all authorities after freeze. Uses the resolved
+    // mint (created OR provided) — the previous `this.config.mint`-only
+    // check silently skipped revocation for internally created mints.
+    if (this.config.revokeAuthoritiesAfterFreeze && mint) {
       await revokeAllAuthorities(this.ctx, {
         wallet: freezeAuthority,
-        mint: this.config.mint,
+        mint,
         mode: this.options.dryRun ? 'simulate' : 'execute',
       });
     }
@@ -1249,8 +1625,12 @@ export class LifecycleController {
 
     // Use the profit pipeline
     const relayWallets = Array.from({ length: this.config.relayWalletCount }, () => Keypair.generate());
-    // Relays receive real SOL mid-pipeline — persist them before routing.
+    // Relays receive real SOL mid-pipeline — persist them before routing and
+    // register them so no future launch ever reuses an exit relay address.
     this.persistLineage('exit-relay', relayWallets);
+    for (const relay of relayWallets) {
+      this.registry?.register('relay', relay.publicKey.toBase58());
+    }
     const pipelineResult = await startProfitPipeline(this.ctx, {
       sourceWallet: profitWallet ?? Keypair.generate(), // placeholder when no profit wallet configured
       profitLamports: simulatedProfit,

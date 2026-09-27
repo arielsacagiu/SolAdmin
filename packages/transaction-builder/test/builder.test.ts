@@ -7,6 +7,7 @@ import {
 } from '@solana/web3.js';
 import { buildSignedTransaction, prepareUnsigned } from '../src/builder.js';
 import { computeBudgetInstructions, jitoTipInstruction } from '../src/compute-budget.js';
+import { jitterTip } from '../src/sender.js';
 import { JITO_TIP_ACCOUNTS_FALLBACK } from '@solana-toolkit/rpc-client';
 
 // Valid 32-byte base58 blockhash for message compilation in tests.
@@ -14,6 +15,30 @@ const blockhash = {
   blockhash: 'EETub36tYt4Qh6t4tDfV7ysnjfeGjVjPfFQHqKsetMNK',
   lastValidBlockHeight: 1000,
 };
+
+describe('jitterTip', () => {
+  it('returns the exact tip when jitter is disabled', () => {
+    expect(jitterTip(100_000n, 0)).toBe(100_000n);
+  });
+
+  it('jitters within ±jitterBps bounds and varies across draws', () => {
+    const base = 100_000n;
+    const seen = new Set<string>();
+    for (let i = 0; i < 100; i++) {
+      const tip = jitterTip(base, 1_000); // ±10%
+      expect(tip).toBeGreaterThanOrEqual((base * 9n) / 10n);
+      expect(tip).toBeLessThanOrEqual((base * 11n) / 10n);
+      seen.add(tip.toString());
+    }
+    // A CSPRNG draw must not collapse to a single value across bundles.
+    expect(seen.size).toBeGreaterThan(1);
+  });
+
+  it('never returns a non-positive tip', () => {
+    expect(jitterTip(1n, 10_000)).toBeGreaterThan(0n);
+    expect(jitterTip(0n, 1_000)).toBe(0n);
+  });
+});
 
 describe('compute budget', () => {
   it('produces setComputeUnitLimit and setComputeUnitPrice', () => {
