@@ -18,8 +18,7 @@ import { assertLifecycleConfigShape, parseConfigFile, writeJson } from '@solana-
 import type { LifecycleConfig } from '@solana-toolkit/types';
 import { bootstrap, loadWallet, printResult, type GlobalOptions } from '../shared.js';
 import { createToken } from '@solana-toolkit/services';
-import { pumpfunLaunchBuy, moonitLaunchBuy, raydiumAmmV4Launch } from '@solana-toolkit/dex';
-import { watchPumpfunCurve } from '@solana-toolkit/dex';
+import { pumpfunLaunchBuy, moonitLaunchBuy, raydiumAmmV4Launch, readCurvePrice, watchPumpfunCurve } from '@solana-toolkit/dex';
 import { runAutoSell } from '@solana-toolkit/dex';
 import { consolidateAllAssets, fundWallet } from '@solana-toolkit/services';
 import { generateBatchWallets } from '@solana-toolkit/wallet-manager';
@@ -46,6 +45,7 @@ export function registerLifecycleCommand(program: Command): void {
     .option('--continuous', 'run the lifecycle in a continuous outer loop (fresh launch per iteration)')
     .option('--max-restarts <n>', 'maximum restarts in continuous mode; 0 = unlimited (default: 0)')
     .option('--restart-delay-ms <ms>', 'delay between continuous iterations in ms (default: 30000)')
+    .option('--restart-delay-max-ms <ms>', 'upper bound for the inter-launch delay (jitter)')
     .option('--restart-on-success', 'restart even after successful iterations')
     .action(async (opts: GlobalOptions & {
       config: string;
@@ -57,6 +57,7 @@ export function registerLifecycleCommand(program: Command): void {
       continuous?: boolean;
       maxRestarts?: string;
       restartDelayMs?: string;
+      restartDelayMaxMs?: string;
       restartOnSuccess?: boolean;
     }) => {
       const cfg = parseConfigFile<LifecycleConfig>(opts.config);
@@ -89,6 +90,7 @@ async function runControllerLifecycle(
     continuous?: boolean;
     maxRestarts?: string;
     restartDelayMs?: string;
+    restartDelayMaxMs?: string;
     restartOnSuccess?: boolean;
   },
   cfg: LifecycleConfig,
@@ -182,6 +184,7 @@ async function runControllerLifecycle(
       enabled: opts.continuous ?? false,
       maxRestarts,
       restartDelayMs,
+      restartDelayMaxMs: opts.restartDelayMaxMs !== undefined ? Number(opts.restartDelayMaxMs) : restartDelayMs,
       restartOnSuccess: opts.restartOnSuccess ?? false,
     },
   });
@@ -384,7 +387,7 @@ async function runLegacyLifecycle(
         wallet: buyer,
         mint: launchMint,
         venue: cfg.exit.route === 'pumpfun' ? 'pumpfun' : cfg.exit.route as never,
-        entryPriceSol: 0.000000001, // placeholder; production reads the launch fill
+        entryPriceSol: (await readCurvePrice(dex, launchMint))?.priceSolPerToken || 0,
         slippageBps: cfg.exit.slippageBps,
         mode: runMode,
         trigger: {

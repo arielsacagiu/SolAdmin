@@ -15,7 +15,9 @@
  */
 
 import type { JitoConfig } from '@solana-toolkit/types';
-import { moduleLogger, retry } from '@solana-toolkit/utils';
+import { moduleLogger, proxiedFetch, retry, securePick } from '@solana-toolkit/utils';
+
+const fetch = proxiedFetch();
 
 const log = moduleLogger('jito');
 
@@ -189,7 +191,7 @@ export class JitoBundleClient {
    */
   async randomTipAccount(): Promise<string> {
     const tips = await this.getTipAccounts();
-    return tips[Math.floor(Math.random() * tips.length)]!;
+    return securePick(tips);
   }
 
   /**

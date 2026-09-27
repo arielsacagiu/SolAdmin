@@ -14,7 +14,7 @@ import { Keypair, PublicKey, TransactionInstruction, VersionedTransaction } from
 import { TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import type { SendOutcome } from '@solana-toolkit/types';
 import { chunk, moduleLogger, sleep } from '@solana-toolkit/utils';
-import type { TransactionRequest } from '@solana-toolkit/transaction-builder';
+import { dontFrontMarkerInstruction, type TransactionRequest } from '@solana-toolkit/transaction-builder';
 import type { DexContext } from './context.js';
 import { moonLikeBuyOut } from './swap.js';
 import {
@@ -141,9 +141,15 @@ export async function pumpfunLaunchBuy(
   }
 
   const outcomes: SendOutcome[] = [];
+  const tipLamports = await ctx.jito.recommendedTipLamports(75).catch(() => 0n);
   for (let gi = 0; gi < groups.length; gi++) {
-    const group = groups[gi]!;
-    log.info({ group: gi + 1, txs: group.length }, 'submitting launch bundle group');
+    const raw = groups[gi]!;
+    const group = raw.map((req, i) => ({
+      ...req,
+      instructions: i === 0 ? [...req.instructions, dontFrontMarkerInstruction()] : req.instructions,
+      jitoTipLamports: i === raw.length - 1 ? tipLamports : req.jitoTipLamports,
+    }));
+    log.info({ group: gi + 1, txs: group.length, tipLamports: tipLamports.toString() }, 'submitting launch bundle group');
     const outcome = await ctx.sender.sendBundle(group, { mode });
     outcomes.push(outcome);
     if (mode === 'execute' && gi < groups.length - 1) {
@@ -307,7 +313,13 @@ export async function moonitLaunchBuy(
   }
 
   const outcomes: SendOutcome[] = [launchOutcome];
-  for (const group of chunk(buyTxs, JITO_BUNDLE_MAX_TXS)) {
+  const tipLamports = await ctx.jito.recommendedTipLamports(75).catch(() => 0n);
+  for (const raw of chunk(buyTxs, JITO_BUNDLE_MAX_TXS)) {
+    const group = raw.map((req, i) => ({
+      ...req,
+      instructions: i === 0 ? [...req.instructions, dontFrontMarkerInstruction()] : req.instructions,
+      jitoTipLamports: i === raw.length - 1 ? tipLamports : req.jitoTipLamports,
+    }));
     outcomes.push(await ctx.sender.sendBundle(group, { mode }));
   }
 

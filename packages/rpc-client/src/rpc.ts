@@ -31,7 +31,7 @@ import {
   type TransactionSignature,
 } from '@solana/web3.js';
 import type { RpcConfig } from '@solana-toolkit/types';
-import { moduleLogger, retry } from '@solana-toolkit/utils';
+import { moduleLogger, proxiedFetch, retry } from '@solana-toolkit/utils';
 
 const log = moduleLogger('rpc-client');
 
@@ -63,6 +63,7 @@ export class SolanaRpcClient {
         commitment: config.commitment as Commitment,
         wsEndpoint: config.wsUrl,
         confirmTransactionInitialTimeout: 60_000,
+        fetch: proxiedFetch(),
       }),
       consecutiveFailures: 0,
       cooldownUntil: 0,

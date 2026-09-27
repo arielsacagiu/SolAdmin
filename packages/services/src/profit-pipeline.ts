@@ -29,7 +29,7 @@ import {
   getAssociatedTokenAddressSync,
   TOKEN_PROGRAM_ID,
 } from '@solana/spl-token';
-import { moduleLogger, sleep } from '@solana-toolkit/utils';
+import { moduleLogger, secureUnit, sleep } from '@solana-toolkit/utils';
 import { jupiterSwapPlan, sendPrebuiltSwap, type DexContext } from '@solana-toolkit/dex';
 import { USDC_MINT, WSOL_MINT } from '@solana-toolkit/solana-programs';
 import type { ServiceContext } from './context.js';
@@ -118,7 +118,7 @@ export async function startProfitPipeline(
 ): Promise<ProfitPipelineResult> {
   const { sourceWallet, profitLamports, config } = params;
   const mode = params.mode ?? 'simulate';
-  const rng = params.rng ?? Math.random;
+  const rng = params.rng ?? secureUnit;
 
   const result: ProfitPipelineResult = {
     success: false,

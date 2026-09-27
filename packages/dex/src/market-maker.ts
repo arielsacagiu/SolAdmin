@@ -25,7 +25,7 @@
 
 import { Keypair, PublicKey } from '@solana/web3.js';
 import type { SendOutcome, SwapVenue } from '@solana-toolkit/types';
-import { moduleLogger, sleep } from '@solana-toolkit/utils';
+import { moduleLogger, secureUnit, sleep } from '@solana-toolkit/utils';
 import { fundWallet, type TransactionRequest } from '@solana-toolkit/transaction-builder';
 import type { DexContext } from './context.js';
 import { executeSwap } from './swap.js';
@@ -81,15 +81,13 @@ const treasuryPool: Keypair[] = [];
  * exactly once per launch, ensuring no address reuse.
  */
 export function getNextTreasury(config?: TreasuryRotationConfig): Keypair {
-  if (treasuryPool.length > 0) {
+  // Rotation is the default. The in-memory pool reused addresses inside one
+  // process and linked launches. Callers that still push into the pool via
+  // returnTreasury do not get those keys back.
+  if (config?.enabled === false && treasuryPool.length > 0) {
     const treasury = treasuryPool.shift()!;
-    log.info(
-      { treasury: treasury.publicKey.toBase58().slice(0, 6) },
-      'reusing treasury from pool for next operation',
-    );
     return treasury;
   }
-  // Generate fresh treasury for clean lineage
   return generateTreasuryKeypair(config);
 }
 
@@ -99,7 +97,10 @@ export function getNextTreasury(config?: TreasuryRotationConfig): Keypair {
  * different launches to maintain clean lineage.
  */
 export function returnTreasury(treasury: Keypair): void {
-  treasuryPool.push(treasury);
+  log.info(
+    { treasury: treasury.publicKey.toBase58().slice(0, 6) },
+    'treasury reuse rejected — rotation keeps each treasury single-use',
+  );
 }
 
 /**
@@ -263,7 +264,7 @@ export async function runMMSkew(ctx: DexContext, opts: BatchSwapOptions): Promis
     rounds: opts.rounds,
   };
   const mode = opts.mode ?? (ctx.sender.effectiveMode() as 'simulate' | 'execute');
-  const rng = opts.rng ?? Math.random;
+  const rng = opts.rng ?? secureUnit;
   let consecutiveFailures = 0;
 
   // Independent deadline clocks per side, N legs each per round budget.
@@ -435,7 +436,7 @@ export async function increaseHolders(
   const results: { buyer: string; ok: boolean }[] = [];
   // Funding overhead: purchase amount + 20k lamports for fees/rent.
   const fundingPerBuyer = params.buyLamportsPerWallet + 20_000n;
-  const rng = params.rng ?? Math.random;
+  const rng = params.rng ?? secureUnit;
   const preFund = params.preFundBuyers ?? true;
   for (const [index, buyer] of params.buyerWallets.entries()) {
     try {

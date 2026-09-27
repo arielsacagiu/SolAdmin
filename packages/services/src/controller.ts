@@ -24,7 +24,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Keypair } from '@solana/web3.js';
-import { moduleLogger, sleep } from '@solana-toolkit/utils';
+import { moduleLogger, secureInt, sleep } from '@solana-toolkit/utils';
 import { fundWallet } from '@solana-toolkit/transaction-builder';
 import { writeEncryptedKeystore } from '@solana-toolkit/wallet-manager';
 import type { ServiceContext } from './context.js';
@@ -35,6 +35,8 @@ import {
   freshLaunchLineage,
   freshBuyerWallets,
   readCurvePrice,
+  pumpfunLaunchBuy,
+  moonitLaunchBuy,
   type DexContext,
 } from '@solana-toolkit/dex';
 import {
@@ -286,6 +288,8 @@ export interface ContinuousLifecycleOptions {
   enabled?: boolean;
   /** Delay between lifecycle iterations in ms (default: 30_000). */
   restartDelayMs?: number;
+  /** Upper bound for the inter-launch sleep. When set, the delay is uniform in [restartDelayMs, restartDelayMaxMs]. */
+  restartDelayMaxMs?: number;
   /**
    * Maximum number of restarts per start() call. 0 means unlimited
    * (default: 0). The initial pass is not counted as a restart.
@@ -334,6 +338,11 @@ export interface LifecycleControllerOptions {
   keystoreDir?: string;
   /** Keystore encryption password (convention: SOLADMIN_KEYSTORE_PASSWORD). */
   keystorePassword?: string;
+  /**
+   * Refuse to generate wallets when keystoreDir or password is missing.
+   * Defaults to true outside dry-run.
+   */
+  requireKeyPersistence?: boolean;
   /**
    * Wallet holding realized SOL profits; used as the profit-pipeline source
    * in the exit stage. When omitted the exit stage uses a simulated 1 SOL
@@ -431,6 +440,8 @@ export class LifecycleController {
    * stage without requiring options.freezeAuthority for internal creations.
    */
   private createdFreezeAuthority: Keypair | null = null;
+  /** Cached bonding-curve creator so PumpSwap pricing survives curve-account closure. */
+  private curveCreator: string | undefined;
 
   // --- Price telemetry state (Gap 2) ---
   /** Background price poll timer (unref'd; never holds the process open). */
@@ -565,7 +576,11 @@ export class LifecycleController {
   private persistLineage(role: string, wallets: Keypair[]): string[] {
     const dir = this.options.keystoreDir;
     const password = this.options.keystorePassword ?? process.env['SOLADMIN_KEYSTORE_PASSWORD'];
+    const requirePersist = this.options.requireKeyPersistence ?? !this.options.dryRun;
     if (!dir || !password) {
+      if (requirePersist) {
+        throw new Error('keystoreDir and SOLADMIN_KEYSTORE_PASSWORD are required before funding wallets');
+      }
       log.warn('keystoreDir/password not set — generated wallets are TRANSIENT (lost on process exit)');
       return [];
     }
@@ -609,7 +624,11 @@ export class LifecycleController {
     const mint = this.mintAddress || this.config.mint;
     if (!mint) return;
     try {
-      const snap = await readCurvePrice(this.ctx as unknown as DexContext, mint);
+      const snap = await retry(
+        () => readCurvePrice(this.ctx as unknown as DexContext, mint, this.curveCreator),
+        { retries: 2, backoffMs: 400, label: 'curve-price' },
+      );
+      if (snap?.creator) this.curveCreator = snap.creator;
       if (snap && snap.priceSolPerToken > 0) {
         this.monitorData.currentPrice = snap.priceSolPerToken;
         this.monitorData.lastUpdated = Date.now();
@@ -698,6 +717,7 @@ export class LifecycleController {
     const cont = this.options.continuous;
     const isContinuous = cont?.enabled === true;
     const restartDelayMs = cont?.restartDelayMs ?? 30_000;
+    const restartDelayMaxMs = cont?.restartDelayMaxMs ?? restartDelayMs;
     const maxRestarts = cont?.maxRestarts ?? 0; // 0 = unlimited
     const restartOnSuccess = cont?.restartOnSuccess ?? false;
 
@@ -733,7 +753,7 @@ export class LifecycleController {
           { nextIteration: this.iterations + 1, delayMs: restartDelayMs, lastSuccess: result.success },
           'outer loop: preparing next lifecycle iteration',
         );
-        await sleep(restartDelayMs);
+        await sleep(secureInt(restartDelayMs, Math.max(restartDelayMs, restartDelayMaxMs)));
         if (this.stopped) break;
         result = await this.runOnce();
       }
@@ -850,6 +870,7 @@ export class LifecycleController {
     this.monitorData = null;
     this.stopPricePolling();
     this.launchLineage = null;
+    this.curveCreator = undefined;
     this.startedAt = Date.now();
     if (this.config.createTokenEnabled) {
       this.mintAddress = undefined;
@@ -962,6 +983,15 @@ export class LifecycleController {
         success: true,
         message: `Mint provided externally: ${this.mintAddress}`,
         data: { mint: this.mintAddress },
+      };
+    }
+    const venue = this.config.launchVenue;
+    if (venue === 'pumpfun' || venue === 'moonit') {
+      return {
+        stage: 'creation',
+        success: true,
+        message: `Mint deferred to ${venue} launch (venue program creates the mint)`,
+        data: { deferred: true, venue },
       };
     }
     if (!this.config.createTokenEnabled) {
@@ -1177,6 +1207,9 @@ export class LifecycleController {
       anonymity: this.anonymity,
       antiCorrelation: this.options.antiCorrelationConfig ?? ac,
       registry: this.registry ?? undefined,
+      onRelay: (relay) => {
+        this.persistLineage('fund-relay', [relay]);
+      },
       mode: this.options.dryRun ? 'simulate' : 'execute',
     });
 
@@ -1192,23 +1225,73 @@ export class LifecycleController {
     // every buyer a second time.
     // Note: We need to handle the DexContext type properly
     const dexCtx = this.ctx as unknown as DexContext;
-    const holderResult = await increaseHolders(dexCtx, {
-      venue: this.config.launchVenue as any, // Cast to SwapVenue type
-      treasury: lineage.treasury,
-      buyerWallets: lineage.buyers,
-      mint: this.mintAddress || this.config.mint || '',
-      buyLamportsPerWallet: this.config.buyLamportsPerWallet,
-      slippageBps: this.config.slippageBps,
-      mode: this.options.dryRun ? 'simulate' : 'execute',
-      interBuyerDelayMs: this.anonymity.maxInterBuyerDelayMs,
-      // CSPRNG for the inter-buyer purchase timing (anti-correlation).
-      rng: ac.cryptoRng ? createCryptoRng() : undefined,
-      preFundBuyers: false,
-    });
+    const mode = this.options.dryRun ? 'simulate' : 'execute';
+    const venue = this.config.launchVenue;
+    let successfulBuyers = 0;
+    let failedBuyers = 0;
+
+    if ((venue === 'pumpfun' || venue === 'moonit') && !this.mintAddress) {
+      const cap = venue === 'pumpfun' ? 28 : 6;
+      const buyers = lineage.buyers.slice(0, cap);
+      if (buyers.length < lineage.buyers.length) {
+        log.warn({ venue, cap, buyers: lineage.buyers.length }, 'buyer count capped to venue limit');
+      }
+      if (venue === 'pumpfun') {
+        const launched = await pumpfunLaunchBuy(dexCtx, {
+          treasury: lineage.treasury,
+          name: this.config.tokenName,
+          symbol: this.config.tokenSymbol,
+          uri: this.config.metadataUri,
+          buyers,
+          buyLamportsPerBuyer: this.config.buyLamportsPerWallet,
+          slippageBps: this.config.slippageBps,
+          mode,
+        });
+        this.setMintAddress(launched.mint);
+        this.curveCreator = lineage.treasury.publicKey.toBase58();
+        successfulBuyers = buyers.length;
+        failedBuyers = 0;
+      } else {
+        const launched = await moonitLaunchBuy(dexCtx, {
+          treasury: lineage.treasury,
+          launch: {
+            name: this.config.tokenName,
+            symbol: this.config.tokenSymbol,
+            description: this.config.tokenName,
+            imageFilePath: this.config.metadataUri,
+            decimals: this.config.tokenDecimals,
+            totalSupplyRaw: this.config.tokenSupplyRaw,
+            collateralCollectedLamports: this.config.buyLamportsPerWallet,
+            curveType: 'classic',
+          },
+          buyers,
+          buyLamportsPerBuyer: this.config.buyLamportsPerWallet,
+          slippageBps: this.config.slippageBps,
+          mode,
+        });
+        this.setMintAddress(launched.mint);
+        successfulBuyers = buyers.length;
+        failedBuyers = 0;
+      }
+    } else {
+      const holderResult = await increaseHolders(dexCtx, {
+        venue: venue as never,
+        treasury: lineage.treasury,
+        buyerWallets: lineage.buyers,
+        mint: this.mintAddress || this.config.mint || '',
+        buyLamportsPerWallet: this.config.buyLamportsPerWallet,
+        slippageBps: this.config.slippageBps,
+        mode,
+        interBuyerDelayMs: this.anonymity.maxInterBuyerDelayMs,
+        rng: ac.cryptoRng ? createCryptoRng() : undefined,
+        preFundBuyers: false,
+      });
+      successfulBuyers = holderResult.results.filter((r) => r.ok).length;
+      failedBuyers = holderResult.results.filter((r) => !r.ok).length;
+    }
 
     // Update monitor data with launch results
     if (this.monitorData) {
-      const successfulBuyers = holderResult.results.filter(r => r.ok).length;
       this.monitorData.holdersCount = successfulBuyers;
       this.monitorData.volume24h = BigInt(successfulBuyers) * this.config.buyLamportsPerWallet;
       this.monitorData.lastUpdated = Date.now();
@@ -1237,11 +1320,12 @@ export class LifecycleController {
     return {
       stage: 'launch',
       success: true,
-      message: `Launch completed: ${holderResult.results.filter(r => r.ok).length} successful buyers`,
+      message: `Launch completed: ${successfulBuyers} successful buyers`,
       data: {
-        successfulBuyers: holderResult.results.filter(r => r.ok).length,
-        failedBuyers: holderResult.results.filter(r => !r.ok).length,
-        totalVolumeLamports: (BigInt(holderResult.results.filter(r => r.ok).length) * this.config.buyLamportsPerWallet).toString(),
+        successfulBuyers,
+        failedBuyers,
+        mint: this.mintAddress,
+        totalVolumeLamports: (BigInt(successfulBuyers) * this.config.buyLamportsPerWallet).toString(),
       },
     };
   }
@@ -1276,6 +1360,7 @@ export class LifecycleController {
       anonymity: this.anonymity,
       antiCorrelation: this.options.antiCorrelationConfig ?? this.antiCorrelation,
       registry: this.registry ?? undefined,
+      onRelay: (relay) => this.persistLineage('mm-fund-relay', [relay]),
       mode: this.options.dryRun ? 'simulate' : 'execute',
     });
 
@@ -1339,6 +1424,7 @@ export class LifecycleController {
       anonymity: this.anonymity,
       antiCorrelation: this.options.antiCorrelationConfig ?? this.antiCorrelation,
       registry: this.registry ?? undefined,
+      onRelay: (relay) => this.persistLineage('txn-fund-relay', [relay]),
       mode: this.options.dryRun ? 'simulate' : 'execute',
     });
 

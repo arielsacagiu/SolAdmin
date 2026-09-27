@@ -34,6 +34,8 @@ export interface CurveSnapshot {
   /** SOL per token (market price on the curve). */
   priceSolPerToken: number;
   capturedAt: string;
+  /** Bonding-curve creator. Required to price the migrated PumpSwap pool. */
+  creator?: string;
 }
 
 /**
@@ -53,31 +55,35 @@ export interface CurveSnapshot {
 export async function readCurvePrice(
   ctx: DexContext,
   mint: string,
+  creator?: string,
 ): Promise<CurveSnapshot | null> {
   const capturedAt = new Date().toISOString();
 
-  // --- PATH 1: Pump.fun bonding curve (pre-graduation) ---
   const curvePda = pumpBondingCurvePda(mint);
   const curveInfo = await ctx.rpc.accountInfo(curvePda.toBase58());
   if (curveInfo) {
     const curve = decodeBondingCurve(Buffer.from(curveInfo.data));
-    const price = (Number(curve.virtualSolReserves) / Number(curve.virtualTokenReserves)) * 1e9;
-    return {
-      mint,
-      virtualTokenReserves: curve.virtualTokenReserves.toString(),
-      virtualSolReserves: curve.virtualSolReserves.toString(),
-      realTokenReserves: curve.realTokenReserves.toString(),
-      realSolReserves: curve.realSolReserves.toString(),
-      complete: curve.complete,
-      priceSolPerToken: price,
-      capturedAt,
-    };
+    if (!curve.complete) {
+      const price = (Number(curve.virtualSolReserves) / Number(curve.virtualTokenReserves)) * 1e9;
+      return {
+        mint,
+        virtualTokenReserves: curve.virtualTokenReserves.toString(),
+        virtualSolReserves: curve.virtualSolReserves.toString(),
+        realTokenReserves: curve.realTokenReserves.toString(),
+        realSolReserves: curve.realSolReserves.toString(),
+        complete: false,
+        priceSolPerToken: price,
+        capturedAt,
+        creator: curve.creator,
+      };
+    }
+    creator = curve.creator;
   }
 
-  // --- PATH 2: PumpSwap pool (post-graduation) ---
+  if (!creator) return null;
   const poolPda = pumpAmmPoolPda({
     index: 0,
-    creator: '11111111111111111111111111111111',
+    creator,
     baseMint: mint,
     quoteMint: WSOL_MINT,
   });
@@ -102,6 +108,7 @@ export async function readCurvePrice(
     complete: true,
     priceSolPerToken: price,
     capturedAt,
+    creator,
   };
 }
 

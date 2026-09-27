@@ -47,6 +47,11 @@ export function registerControllerCommand(program: Command): void {
     .option('--no-create', 'skip the mint creation stage (requires an existing mint in the config)')
     .option('--dry-run', 'run in dry-run mode (simulate all operations)')
     .option('--treasury-funder <file>', 'persistent root keystore that funds each fresh rotated treasury (required for execute mode)')
+    .option('--keystore-dir <dir>', 'directory for encrypted launch wallets (required in execute mode)')
+    .option('--continuous', 'repeat the lifecycle until stopped')
+    .option('--restart-delay-ms <ms>', 'minimum delay between lifecycle iterations', (v) => parseInt(v, 10), 30_000)
+    .option('--restart-delay-max-ms <ms>', 'maximum delay between lifecycle iterations', (v) => parseInt(v, 10))
+    .option('--max-restarts <n>', 'max extra iterations (0 = unlimited)', (v) => parseInt(v, 10), 0)
     .option('--freeze-authority <file>', 'keystore of the mint freeze authority (enables the freeze stage)')
     .option('--profit-wallet <file>', 'keystore holding realized SOL profits (used by the exit stage)')
     .action(async (opts: GlobalOptions & {
@@ -71,6 +76,11 @@ export function registerControllerCommand(program: Command): void {
       treasuryFunder?: string;
       freezeAuthority?: string;
       profitWallet?: string;
+      keystoreDir?: string;
+      continuous?: boolean;
+      restartDelayMs?: number;
+      restartDelayMaxMs?: number;
+      maxRestarts?: number;
     }) => {
       const { services, mode } = await bootstrap({ ...opts, execute: opts.execute });
       const dryRun = opts.dryRun || mode === 'simulate';
@@ -156,6 +166,18 @@ export function registerControllerCommand(program: Command): void {
         treasuryFunder,
         freezeAuthority,
         profitWallet,
+        keystoreDir: opts.keystoreDir,
+        keystorePassword: process.env['SOLADMIN_KEYSTORE_PASSWORD'],
+        requireKeyPersistence: !dryRun,
+        continuous: opts.continuous
+          ? {
+              enabled: true,
+              restartDelayMs: opts.restartDelayMs,
+              restartDelayMaxMs: opts.restartDelayMaxMs ?? opts.restartDelayMs,
+              maxRestarts: opts.maxRestarts,
+              restartOnSuccess: true,
+            }
+          : undefined,
       });
 
       const result: LifecycleResult = await controller.start();

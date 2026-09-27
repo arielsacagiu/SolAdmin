@@ -10,7 +10,7 @@ import {
   TransactionInstruction,
 } from '@solana/web3.js';
 import type { PriorityFeeConfig } from '@solana-toolkit/types';
-import { moduleLogger } from '@solana-toolkit/utils';
+import { moduleLogger, securePick } from '@solana-toolkit/utils';
 import { JITO_TIP_ACCOUNTS_FALLBACK } from '@solana-toolkit/rpc-client';
 
 const log = moduleLogger('compute-budget');
@@ -38,7 +38,7 @@ export function computeBudgetInstructions(cfg: PriorityFeeConfig, simulatedCu?: 
  */
 export function jitoTipInstruction(payer: PublicKey, tipLamports: bigint, tipAccount?: string): TransactionInstruction {
   const tips = [...JITO_TIP_ACCOUNTS_FALLBACK];
-  const target = tipAccount ?? tips[Math.floor(Math.random() * tips.length)]!;
+  const target = tipAccount ?? securePick(tips);
   return SystemProgram.transfer({
     fromPubkey: payer,
     toPubkey: new PublicKey(target),

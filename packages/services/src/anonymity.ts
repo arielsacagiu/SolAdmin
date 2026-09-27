@@ -271,6 +271,8 @@ export interface FundBuyersParams {
    * rejected (a fresh keypair is substituted).
    */
   registry?: PersistentWalletRegistry;
+  /** Called with each fresh funding relay before any lamports move, so the caller can persist the key. */
+  onRelay?: (relay: Keypair) => void;
 }
 
 /**
@@ -384,7 +386,7 @@ export async function fundBuyerViaRelay(
 export async function fundBuyersAnonymously(
   params: FundBuyersParams,
 ): Promise<FundBuyersResult> {
-  const { ctx, treasury, buyers, lamportsPerBuyer, anonymity, mode, rng: rngParam, registry } = params;
+  const { ctx, treasury, buyers, lamportsPerBuyer, anonymity, mode, rng: rngParam, registry, onRelay } = params;
   const ac: AntiCorrelationConfig = {
     ...DEFAULT_ANTI_CORRELATION_CONFIG,
     ...params.antiCorrelation,
@@ -392,7 +394,7 @@ export async function fundBuyersAnonymously(
   const funded: string[] = [];
   const failures: string[] = [];
   const amounts: Record<string, bigint> = {};
-  const actualRng = ac.cryptoRng ? createCryptoRng() : rngParam ?? Math.random;
+  const actualRng = ac.cryptoRng ? createCryptoRng() : rngParam ?? createCryptoRng();
 
   for (const [index, buyerRaw] of buyers.entries()) {
     try {
@@ -423,6 +425,7 @@ export async function fundBuyersAnonymously(
         // Fresh single-use relay per buyer, registered before use.
         const relay = Keypair.generate();
         registry?.register('relay', relay.publicKey.toBase58());
+        onRelay?.(relay);
         await fundBuyerViaRelay({
           ctx,
           treasury,
@@ -1015,7 +1018,7 @@ export function ensureFreshRelays(relays: Keypair[], registry?: PersistentWallet
 export function randomizeAmount(
   baseAmount: bigint,
   jitterBps: number,
-  rng: () => number = Math.random,
+  rng: () => number = createCryptoRng(),
 ): bigint {
   if (jitterBps === 0) return baseAmount;
 
@@ -1031,7 +1034,7 @@ export function randomizeAmount(
  * @param rng - Random number generator
  * @returns Random delay in milliseconds
  */
-export function randomDelay(maxDelayMs: number, rng: () => number = Math.random): number {
+export function randomDelay(maxDelayMs: number, rng: () => number = createCryptoRng()): number {
   return Math.floor(rng() * maxDelayMs);
 }
 

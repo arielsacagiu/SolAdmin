@@ -5,6 +5,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { secureInt } from './random.js';
 
 export const LAMPORTS_PER_SOL = 1_000_000_000n;
 
@@ -91,7 +92,7 @@ export async function retry<T>(
     } catch (err) {
       lastError = err;
       if (attempt === retries) break;
-      const sleep = backoff * 2 ** attempt + Math.floor(Math.random() * 100);
+      const sleep = backoff * 2 ** attempt + secureInt(0, 99);
       await new Promise((r) => setTimeout(r, sleep));
     }
   }

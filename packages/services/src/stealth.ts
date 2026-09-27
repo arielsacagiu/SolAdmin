@@ -11,7 +11,7 @@
 
 import { Keypair, PublicKey, SystemProgram, TransactionInstruction } from '@solana/web3.js';
 import type { SendOutcome, StealthTransferPlan } from '@solana-toolkit/types';
-import { moduleLogger, sleep } from '@solana-toolkit/utils';
+import { moduleLogger, secureUnit, sleep } from '@solana-toolkit/utils';
 import type { ChainContext } from './context.js';
 
 const log = moduleLogger('stealth');
@@ -51,7 +51,7 @@ export interface StealthTransferOptions {
 export function planStealthTransfer(opts: StealthTransferOptions): StealthTransferPlan {
   const legs = Math.min(opts.legs ?? Math.min(opts.relays.length, 3), opts.relays.length);
   if (legs === 0) throw new Error('stealth transfer needs at least one relay wallet');
-  const rng = opts.rng ?? Math.random;
+  const rng = opts.rng ?? secureUnit;
   const jitterBps = opts.jitterBps ?? 500; // ±5% by default
   const maxDelayMs = opts.maxDelayMs ?? 5_000;
 

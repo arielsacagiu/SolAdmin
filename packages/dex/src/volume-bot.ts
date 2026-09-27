@@ -53,7 +53,7 @@ import {
 } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import type { SendOutcome, SwapVenue } from '@solana-toolkit/types';
-import { moduleLogger, sleep } from '@solana-toolkit/utils';
+import { moduleLogger, secureUnit, sleep } from '@solana-toolkit/utils';
 import type { TransactionRequest } from '@solana-toolkit/transaction-builder';
 import { dontFrontMarkerInstruction } from '@solana-toolkit/transaction-builder';
 import type { DexContext } from './context.js';
@@ -88,7 +88,7 @@ const log = moduleLogger('volume-bot');
  *
  * Accepts an injectable RNG for deterministic tests.
  */
-export function jitterAmount(amount: bigint, jitterBps: number, rng: () => number = Math.random): bigint {
+export function jitterAmount(amount: bigint, jitterBps: number, rng: () => number = secureUnit): bigint {
   if (jitterBps <= 0) return amount;
   const pct = (BigInt(Math.floor(rng() * (jitterBps * 2 + 1))) - BigInt(jitterBps)) / 10_000n;
   const jittered = amount + (amount * pct) / 10_000n;
@@ -99,7 +99,7 @@ export function jitterAmount(amount: bigint, jitterBps: number, rng: () => numbe
  * Randomizes a sleep interval within ±`jitterBps`, floored at `minMs`.
  * Regular fixed cadence is a detection tell; organic flow clusters and bursts.
  */
-export function jitterInterval(baseMs: number, jitterBps: number, minMs: number, rng: () => number = Math.random): number {
+export function jitterInterval(baseMs: number, jitterBps: number, minMs: number, rng: () => number = secureUnit): number {
   if (jitterBps <= 0) return Math.max(baseMs, minMs);
   const factor = 1 + (rng() * (jitterBps * 2) - jitterBps) / 10_000;
   return Math.max(Math.floor(baseMs * factor), minMs);
@@ -458,7 +458,7 @@ export async function runVolumeBot(ctx: DexContext, opts: VolumeBotOptions): Pro
   const pairMode = opts.pairMode ?? 'atomic-bundle';
   const applyDontFront = opts.applyDontFront ?? true;
   const jitterBps = opts.jitterBps ?? 3_000;
-  const rng = opts.rng ?? Math.random;
+  const rng = opts.rng ?? secureUnit;
   const report: VolumeBotReport = {
     pairsExecuted: 0,
     pairsFailed: 0,

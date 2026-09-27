@@ -14,6 +14,7 @@ import {
   SystemProgram,
   TransactionInstruction,
 } from '@solana/web3.js';
+import { securePick } from '@solana-toolkit/utils';
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
@@ -212,7 +213,7 @@ function meta(pubkey: PublicKey, writable = false, signer = false) {
 /** Picks one of the 8 normal fee recipients at random (per official docs). */
 export function randomFeeRecipient(): PublicKey {
   const list = [...PUMPFUN_FEE_RECIPIENTS];
-  return pk(list[Math.floor(Math.random() * list.length)]!);
+  return pk(securePick(list));
 }
 
 /**
