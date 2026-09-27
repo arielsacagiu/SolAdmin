@@ -58,8 +58,21 @@ function envInt(key: string, fallback: number): number {
  */
 export function configFromEnv(): ToolkitConfig {
   const cluster = envStr('SOLADMIN_CLUSTER', 'mainnet') as RpcConfig['cluster'];
+  // Failover pool: SOLADMIN_RPC_URLS is a comma-separated list of endpoints.
+  // When present it feeds the resilient multi-endpoint manager in the
+  // rpc-client; the first entry (or SOLADMIN_RPC_URL) stays primary.
+  const rpcUrls = (process.env['SOLADMIN_RPC_URLS'] ?? '')
+    .split(',')
+    .map((u) => u.trim())
+    .filter((u) => u.length > 0);
+  const primaryRpcUrl = envStr(
+    'SOLADMIN_RPC_URL',
+    cluster === 'devnet' ? 'https://api.devnet.solana.com' : 'https://api.mainnet-beta.solana.com',
+  );
   const rpc: RpcConfig = {
-    rpcUrl: envStr('SOLADMIN_RPC_URL', cluster === 'devnet' ? 'https://api.devnet.solana.com' : 'https://api.mainnet-beta.solana.com'),
+    rpcUrl: primaryRpcUrl,
+    // Dedupe while preserving order; the primary URL always leads the pool.
+    rpcUrls: Array.from(new Set([primaryRpcUrl, ...rpcUrls])),
     wsUrl: process.env['SOLADMIN_RPC_WS_URL'],
     cluster,
     commitment: envStr('SOLADMIN_COMMITMENT', 'confirmed') as RpcConfig['commitment'],

@@ -10,6 +10,14 @@ import type { Cluster, CommitmentLevel, PriorityFeeConfig, RuntimeMode } from '.
 export interface RpcConfig {
   /** HTTP JSON-RPC endpoint. Any provider: Helius, QuickNode, local validator. */
   rpcUrl: string;
+  /**
+   * Failover pool of HTTP JSON-RPC endpoints. When set, the RPC client
+   * health-checks and rotates across these URLs (round-robin with healthy
+   * preference, exponential backoff on failure). `rpcUrl` is kept as the
+   * primary/first endpoint. Can also be provided via the comma-separated
+   * `SOLADMIN_RPC_URLS` environment variable.
+   */
+  rpcUrls?: string[];
   /** WebSocket endpoint for subscriptions. Optional. */
   wsUrl?: string;
   cluster: Cluster;

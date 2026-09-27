@@ -33,7 +33,23 @@ export async function scanTokenHolders(
   const supplyRaw = (mintInfo.value?.data as { parsed?: { info?: { supply?: string } } }).parsed?.info?.supply;
   supply = BigInt(supplyRaw ?? 0);
 
-  for (const program of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+  // MINT PATH DETECTION: the mint account's owner tells us which token
+  // program created the mint — SPL Token (the Pump.fun bonding-curve path and
+  // `createToken` with tokenProgram: 'spl') vs Token-2022 (`createToken`
+  // with tokenProgram: 'token-2022'). We scan the detected program first and
+  // fall back to scanning both when the owner cannot be resolved, so holders
+  // of either mint path are always covered.
+  const mintOwner = mintInfo.value?.owner?.toBase58();
+  let programs: PublicKey[];
+  if (mintOwner === TOKEN_2022_PROGRAM_ID.toBase58()) {
+    programs = [TOKEN_2022_PROGRAM_ID];
+  } else if (mintOwner === TOKEN_PROGRAM_ID.toBase58()) {
+    programs = [TOKEN_PROGRAM_ID];
+  } else {
+    programs = [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID];
+  }
+
+  for (const program of programs) {
     const accounts = await retry(
       async () =>
         (await ctx.rpc.connection.getProgramAccounts(program, {

@@ -52,6 +52,14 @@ export interface LaunchBuyResult {
 /**
  * Pump.fun Launch + Buy.
  *
+ * MINT PATH (pumpfun): the mint is created by the Pump.fun program itself
+ * (`pumpCreateInstruction`, a fresh keypair signs; the token lives in the
+ * SPL Token program and trades on the Pump.fun bonding curve). This path is
+ * deliberately SEPARATE from `services.createToken`, which creates mints via
+ * the SPL Token or Token-2022 programs with configurable extensions — do not
+ * merge the two; downstream operations detect the mint's owning program to
+ * pick the right token program and quote logic (bonding curve vs AMM pair).
+ *
  * The treasury launches the coin; then every buyer wallet (max 28) sends an
  * independent buy transaction. Transactions are bundled through Jito in
  * atomic groups: bundle 1 = create + up to 4 buys, subsequent bundles = up to
@@ -59,6 +67,10 @@ export interface LaunchBuyResult {
  *
  * SECURITY: buyer wallets are pre-funded by the caller (see
  * `services.fundWallets`); only SOL needed for the buy + fees should be held.
+ *
+ * ANONYMITY: each launch must use a FRESH treasury and FRESH buyer wallets
+ * (see `freshLaunchLineage` in market-maker) — never reuse addresses across
+ * launches; reuse creates a permanent on-chain link between them.
  */
 export async function pumpfunLaunchBuy(
   ctx: DexContext,

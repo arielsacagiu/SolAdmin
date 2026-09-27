@@ -27,19 +27,35 @@ export interface StealthTransferOptions {
   /** Randomization seed for jitter (deterministic tests). */
   jitterBps?: number;
   mode?: 'simulate' | 'execute';
+  /**
+   * Injectable RNG (default: Math.random). Anonymity practice: amounts and
+   * inter-leg delays are randomized so legs are not uniform round numbers on
+   * a fixed cadence, which is the classic fingerprint of a scripted split.
+   */
+  rng?: () => number;
+  /** Upper bound for randomized inter-leg delay in ms (default 5_000). */
+  maxDelayMs?: number;
 }
 
 /**
  * Builds a stealth transfer plan: N legs, each with randomized amount
  * (±jitter) and delay.
+ *
+ * ANONYMITY PRACTICES baked in:
+ *  - Each leg uses a DISTINCT relay wallet (never reuse a relay across legs
+ *    or transfers; generate fresh ones per operation).
+ *  - Amounts are randomized within ±jitterBps around the equal split, so no
+ *    leg equals an obvious fraction of the total.
+ *  - Delays are randomized per leg to break uniform cadence.
  */
 export function planStealthTransfer(opts: StealthTransferOptions): StealthTransferPlan {
   const legs = Math.min(opts.legs ?? Math.min(opts.relays.length, 3), opts.relays.length);
   if (legs === 0) throw new Error('stealth transfer needs at least one relay wallet');
+  const rng = opts.rng ?? Math.random;
+  const jitterBps = opts.jitterBps ?? 500; // ±5% by default
+  const maxDelayMs = opts.maxDelayMs ?? 5_000;
 
-  // Split with jitter: base + pseudo-random weight.
-  const weights = Array.from({ length: legs }, (_, i) => 1 + ((i * 37) % 23) / 23);
-  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  // Split with randomized per-leg weights around an equal split (±jitterBps).
   const perLeg = opts.totalLamports / BigInt(legs);
   const plan: StealthTransferPlan = {
     legs: [],
@@ -49,13 +65,22 @@ export function planStealthTransfer(opts: StealthTransferOptions): StealthTransf
   };
   let allocated = 0n;
   for (let i = 0; i < legs; i++) {
-    const weight = weights[i]!;
-    const amount = i === legs - 1 ? opts.totalLamports - allocated : (perLeg * BigInt(Math.round(weight * 100))) / 100n;
-    allocated += amount;
+    let amount: bigint;
+    if (i === legs - 1) {
+      // Final leg takes the exact remainder so the plan always sums up.
+      amount = opts.totalLamports - allocated;
+    } else {
+      // Randomize within ±jitterBps of the equal split.
+      const bps = BigInt(Math.floor(rng() * (jitterBps * 2 + 1))) - BigInt(jitterBps);
+      amount = perLeg + (perLeg * bps) / 10_000n;
+      if (amount <= 5_000n) amount = perLeg; // keep every leg economically meaningful
+      allocated += amount;
+    }
     plan.legs.push({
       relayPublicKey: opts.relays[i]!.publicKey.toBase58(),
       lamports: amount,
-      delayMs: 2_000 + ((i * 731) % 5) * 900,
+      // Randomized delay breaks the fixed-cadence fingerprint between legs.
+      delayMs: Math.floor(rng() * maxDelayMs),
     });
   }
   return plan;

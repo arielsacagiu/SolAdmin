@@ -19,6 +19,7 @@ import {
 import type { AuthorityAction, SendOutcome } from '@solana-toolkit/types';
 import { moduleLogger } from '@solana-toolkit/utils';
 import type { ServiceContext } from './context.js';
+import { scanTokenHolders } from './holders.js';
 import {
   metadataPda,
   pk,
@@ -248,11 +249,16 @@ export async function autoFreezeAllHolders(
   ctx: ServiceContext,
   params: { authority: Keypair; mint: string; mode?: 'simulate' | 'execute' },
 ): Promise<{ frozen: string[]; failures: string[]; outcomes: SendOutcome[] }> {
-  const holders = await scanTokenAccountOwners(ctx, params.mint);
+  // Use paginated full holder scanning (getProgramAccounts) instead of
+  // getTokenLargestAccounts, which only returns the top 20 holders.
+  const holders = await scanTokenHolders(ctx, params.mint, { pageSize: 10_000, maxAccounts: 100_000 });
   const frozen: string[] = [];
   const failures: string[] = [];
   const outcomes: SendOutcome[] = [];
   for (const holder of holders) {
+    // Skip entries where the owner could not be resolved (owner equals the
+    // token account address, meaning we have no wallet address to freeze).
+    if (holder.owner === holder.publicKey || !holder.owner) continue;
     try {
       const outcome = await freezeAccount(ctx, {
         authority: params.authority,
@@ -268,17 +274,6 @@ export async function autoFreezeAllHolders(
     }
   }
   return { frozen, failures, outcomes };
-}
-
-async function scanTokenAccountOwners(ctx: ServiceContext, mint: string) {
-  const accounts = await ctx.rpc.connection.getTokenLargestAccounts(pk(mint));
-  const owners: { tokenAccount: string; owner: string }[] = [];
-  for (const { address } of accounts.value) {
-    const info = await ctx.rpc.connection.getParsedAccountInfo(address);
-    const owner = (info.value?.data as { parsed?: { info?: { owner?: string } } }).parsed?.info?.owner;
-    if (owner) owners.push({ tokenAccount: address.toBase58(), owner });
-  }
-  return owners;
 }
 
 async function detectProgram(ctx: ServiceContext, mint: string): Promise<PublicKey> {

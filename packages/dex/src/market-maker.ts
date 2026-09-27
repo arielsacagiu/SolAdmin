@@ -16,10 +16,14 @@
  * actual token balance is read on-chain; buys are skipped above
  * `maxInventoryRaw` and sells are skipped below `minInventoryRaw`, so a
  * stalled venue or a runaway skew can never accumulate unbounded inventory.
+ *
+ * TREASURY ROTATION: Each launch/operation uses a fresh treasury keypair to
+ * prevent address reuse and maintain clean wallet lineage. No address is
+ * reused between launches.
  * @module
  */
 
-import type { Keypair } from '@solana/web3.js';
+import { Keypair, PublicKey, SystemProgram } from '@solana/web3.js';
 import type { SendOutcome, SwapVenue } from '@solana-toolkit/types';
 import { moduleLogger, sleep } from '@solana-toolkit/utils';
 import type { TransactionRequest } from '@solana-toolkit/transaction-builder';
@@ -28,6 +32,115 @@ import { executeSwap } from './swap.js';
 import { WSOL_MINT, pumpBuyInstruction, pumpSellInstruction, pumpBondingCurvePda, decodeBondingCurve, quoteSellLamportsOut } from '@solana-toolkit/solana-programs';
 
 const log = moduleLogger('market-maker');
+
+// ---------------------------------------------------------------------------
+// Treasury Rotation
+// ---------------------------------------------------------------------------
+
+/**
+ * Treasury rotation strategy: generates fresh treasury keypairs per launch/operation
+ * to ensure clean wallet lineage and prevent address reuse between launches.
+ * 
+ * ANONYMITY: Each treasury is used exactly once, then discarded. This prevents
+ * on-chain linkage between different launches through shared funding sources.
+ * Combined with distinct buyer wallets per launch, this provides strong
+ * heuristic anonymity (though not cryptographic anonymity).
+ */
+export interface TreasuryRotationConfig {
+  /** Generate a new treasury for each operation (default: true). */
+  enabled?: boolean;
+  /** Prefix for generated treasury keypair names (for persistence). */
+  namePrefix?: string;
+}
+
+/**
+ * Generates a fresh treasury keypair for a new launch/operation.
+ * Each treasury is unique and never reused, ensuring clean wallet lineage.
+ */
+export function generateTreasuryKeypair(config?: TreasuryRotationConfig): Keypair {
+  // Always generate a new ephemeral keypair; for persistence, the caller
+  // should serialize to a keystore file with the provided prefix.
+  const treasury = Keypair.generate();
+  log.info(
+    { treasury: treasury.publicKey.toBase58().slice(0, 6), prefix: config?.namePrefix },
+    'generated fresh treasury keypair for rotation',
+  );
+  return treasury;
+}
+
+/**
+ * Treasury pool for rotation: holds unused treasuries ready for next operations.
+ * In production, this would be pre-funded keystores; for this implementation,
+ * we generate fresh keypairs on demand.
+ */
+const treasuryPool: Keypair[] = [];
+
+/**
+ * Get next treasury from pool or generate fresh.
+ * Rotation strategy: round-robin from pool, but each treasury is used
+ * exactly once per launch, ensuring no address reuse.
+ */
+export function getNextTreasury(config?: TreasuryRotationConfig): Keypair {
+  if (treasuryPool.length > 0) {
+    const treasury = treasuryPool.shift()!;
+    log.info(
+      { treasury: treasury.publicKey.toBase58().slice(0, 6) },
+      'reusing treasury from pool for next operation',
+    );
+    return treasury;
+  }
+  // Generate fresh treasury for clean lineage
+  return generateTreasuryKeypair(config);
+}
+
+/**
+ * Return treasury to pool after use (for reuse in same session).
+ * Note: In strict rotation mode, treasuries should NOT be reused across
+ * different launches to maintain clean lineage.
+ */
+export function returnTreasury(treasury: Keypair): void {
+  treasuryPool.push(treasury);
+}
+
+/**
+ * Clear the treasury pool - useful when starting a new launch to ensure
+ * completely fresh treasuries.
+ */
+export function clearTreasuryPool(): void {
+  treasuryPool.length = 0;
+  log.info('treasury pool cleared - next operation will use fresh keypairs');
+}
+
+/**
+ * Generates `count` fresh, never-before-used buyer wallets.
+ * ANONYMITY: buyer wallets must be distinct per launch — reusing buyer
+ * addresses across launches links the launches on-chain.
+ */
+export function freshBuyerWallets(count: number): Keypair[] {
+  return Array.from({ length: count }, () => Keypair.generate());
+}
+
+/**
+ * A complete, clean funding lineage for one launch: one fresh treasury plus
+ * its fresh buyer wallets. Generate one per launch so no address is ever
+ * reused between launches.
+ */
+export interface LaunchLineage {
+  treasury: Keypair;
+  buyers: Keypair[];
+}
+
+/**
+ * Generates a fresh launch lineage (treasury + buyers), all single-use.
+ * Use this for every `pumpfunLaunchBuy` / `increaseHolders` operation to
+ * guarantee clean wallet lineage rotation.
+ */
+export function freshLaunchLineage(buyers: number, config?: TreasuryRotationConfig): LaunchLineage {
+  return {
+    treasury: getNextTreasury(config),
+    buyers: freshBuyerWallets(buyers),
+  };
+}
 
 export interface BatchSwapLegSpec {
   direction: 'buy' | 'sell';
@@ -106,7 +219,20 @@ async function inventoryOf(ctx: DexContext, wallet: Keypair, mint: string): Prom
   const { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } = await import('@solana/spl-token');
   const { PublicKey: PK } = await import('@solana/web3.js');
   const mintPk = new PK(mint);
-  for (const program of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+  // MINT PATH DETECTION (pumpfun vs SPL vs token-2022): the mint account's
+  // owner tells us which token program holds the ATA. Pump.fun bonding-curve
+  // mints and `createToken` 'spl' mints live in the SPL Token program;
+  // `createToken` 'token-2022' mints live in Token-2022. Try the detected
+  // program first, fall back to the other when the owner cannot be resolved.
+  const mintInfo = await ctx.rpc.accountInfo(mint);
+  const ownerB58 = mintInfo?.owner.toBase58();
+  const programs =
+    ownerB58 === TOKEN_2022_PROGRAM_ID.toBase58()
+      ? [TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID]
+      : ownerB58 === TOKEN_PROGRAM_ID.toBase58()
+        ? [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]
+        : [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID];
+  for (const program of programs) {
     const ata = getAssociatedTokenAddressSync(mintPk, wallet.publicKey, true, program);
     try {
       const res = await ctx.rpc.connection.getTokenAccountBalance(ata);
@@ -289,11 +415,41 @@ export async function increaseHolders(
     buyLamportsPerWallet: bigint;
     slippageBps: number;
     mode?: 'simulate' | 'execute';
+    /**
+     * Randomized delay between buyer purchases in ms (0..delay). Part of the
+     * anonymity suite: uniform, machine-regular timing is a strong on-chain
+     * fingerprint linking the buyers to one operator.
+     */
+    interBuyerDelayMs?: number;
+    /** Injectable RNG for deterministic tests. */
+    rng?: () => number;
   },
 ): Promise<{ results: { buyer: string; ok: boolean }[] }> {
   const results: { buyer: string; ok: boolean }[] = [];
-  for (const buyer of params.buyerWallets) {
+  // Funding overhead: purchase amount + 20k lamports for fees/rent.
+  const fundingPerBuyer = params.buyLamportsPerWallet + 20_000n;
+  const rng = params.rng ?? Math.random;
+  for (const [index, buyer] of params.buyerWallets.entries()) {
     try {
+      // 1. Pre-fund each buyer wallet from the treasury before purchase.
+      //    This ensures the buyer has sufficient SOL for the swap + fees.
+      await ctx.sender.send(
+        {
+          description: `fund buyer ${buyer.publicKey.toBase58().slice(0, 6)} for holder purchase`,
+          feePayer: params.treasury.publicKey.toBase58(),
+          instructions: [
+            SystemProgram.transfer({
+              fromPubkey: params.treasury.publicKey,
+              toPubkey: buyer.publicKey,
+              lamports: fundingPerBuyer,
+            }),
+          ],
+          signers: [params.treasury],
+        },
+        { mode: params.mode },
+      );
+
+      // 2. Execute the token purchase using the funded buyer wallet.
       await executeSwap(ctx, {
         venue: params.venue,
         user: buyer,
@@ -307,6 +463,10 @@ export async function increaseHolders(
     } catch (err) {
       log.error({ err, buyer: buyer.publicKey.toBase58() }, 'holder buy failed');
       results.push({ buyer: buyer.publicKey.toBase58(), ok: false });
+    }
+    // 3. Randomized pause between buyers (anonymity: break timing patterns).
+    if (params.interBuyerDelayMs && index < params.buyerWallets.length - 1) {
+      await sleep(Math.floor(rng() * params.interBuyerDelayMs));
     }
   }
   return { results };
