@@ -21,9 +21,12 @@
  * @module
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { Keypair } from '@solana/web3.js';
 import { moduleLogger, sleep } from '@solana-toolkit/utils';
 import { fundWallet } from '@solana-toolkit/transaction-builder';
+import { writeEncryptedKeystore } from '@solana-toolkit/wallet-manager';
 import type { ServiceContext } from './context.js';
 import {
   increaseHolders,
@@ -260,6 +263,14 @@ export interface LifecycleControllerOptions {
    */
   treasuryFunder?: Keypair;
   /**
+   * Directory under which every launch's generated wallets (treasury,
+   * buyers, relays, MM/txn wallets) are persisted as encrypted keystores.
+   * Each launch gets its own subdirectory so keys never mix across launches.
+   */
+  keystoreDir?: string;
+  /** Keystore encryption password (convention: SOLADMIN_KEYSTORE_PASSWORD). */
+  keystorePassword?: string;
+  /**
    * Wallet holding realized SOL profits; used as the profit-pipeline source
    * in the exit stage. When omitted the exit stage uses a simulated 1 SOL
    * placeholder and logs a warning.
@@ -398,6 +409,56 @@ export class LifecycleController {
       'fresh treasury funded from root wallet',
     );
     return true;
+  }
+
+  /**
+   * Persists generated keypairs for ONE launch under
+   * `<keystoreDir>/<tokenSymbol>-<startedAt>/` before any wallet is funded.
+   *
+   * FAIL-CLOSED: a persistence error aborts the stage — losing the key of a
+   * wallet that is about to hold funds is unrecoverable, while regenerating
+   * an unfunded wallet costs nothing. When keystoreDir (or password) is not
+   * configured the wallets stay transient and a warning is logged — same as
+   * the pre-persistence behavior.
+   *
+   * Recovery: each launch directory carries a manifest.json (label, role,
+   * publicKey, file) so interrupted launches can be reloaded with
+   * loadKeystore / loadBatchWallets instead of abandoning funded wallets.
+   */
+  private persistLineage(role: string, wallets: Keypair[]): string[] {
+    const dir = this.options.keystoreDir;
+    const password = this.options.keystorePassword ?? process.env['SOLADMIN_KEYSTORE_PASSWORD'];
+    if (!dir || !password) {
+      log.warn('keystoreDir/password not set — generated wallets are TRANSIENT (lost on process exit)');
+      return [];
+    }
+    const launchDir = path.join(dir, `${this.config.tokenSymbol}-${this.startedAt}`);
+    fs.mkdirSync(launchDir, { recursive: true });
+    const files: string[] = [];
+    const manifest: { label: string; publicKey: string; file: string; role: string }[] = [];
+    for (const [i, kp] of wallets.entries()) {
+      const label = `${role}-${i + 1}`;
+      const file = path.join(launchDir, `${label}.keystore.json`);
+      writeEncryptedKeystore(kp, password, file, label);
+      files.push(file);
+      manifest.push({ label, publicKey: kp.publicKey.toBase58(), file, role });
+    }
+    const manifestFile = path.join(launchDir, 'manifest.json');
+    const existing = fs.existsSync(manifestFile)
+      ? (JSON.parse(fs.readFileSync(manifestFile, 'utf8')) as { wallets: typeof manifest })
+      : { wallets: [] };
+    fs.writeFileSync(
+      manifestFile,
+      JSON.stringify({
+        tokenSymbol: this.config.tokenSymbol,
+        createdAt: new Date().toISOString(),
+        mint: this.mintAddress ?? null,
+        wallets: [...existing.wallets, ...manifest],
+      }, null, 2),
+      'utf8',
+    );
+    log.info({ role, count: wallets.length, launchDir }, 'launch wallets persisted');
+    return files;
   }
 
   /**
@@ -654,6 +715,12 @@ export class LifecycleController {
     // Generate fresh launch lineage (treasury + buyers)
     const lineage = freshLaunchLineage(this.config.buyerWalletCount);
 
+    // 1. PERSIST first — keys survive process death even if funding or later
+    //    stages fail (fail-closed: a persistence error aborts the stage
+    //    before any SOL moves).
+    this.persistLineage('treasury', [lineage.treasury]);
+    this.persistLineage('buyer', lineage.buyers);
+
     // Fund the fresh treasury from the persistent root wallet first: it
     // starts at zero SOL, and every buyer-funding transfer below draws from
     // it. Total = per-buyer funding (with fee headroom) for all buyers, plus
@@ -732,6 +799,10 @@ export class LifecycleController {
     // Generate fresh wallets for market making
     const mmLineage = freshLaunchLineage(2); // 2 wallets for buy/sell
 
+    // Persist before funding (same fail-closed ordering as the launch stage).
+    this.persistLineage('mm-treasury', [mmLineage.treasury]);
+    this.persistLineage('mm-wallet', mmLineage.buyers);
+
     // Fund the fresh MM treasury from the root wallet: 2 wallets' buy
     // notional + fee headroom, plus transfer fees.
     await this.fundTreasury(
@@ -792,6 +863,11 @@ export class LifecycleController {
     // funded from the root wallet like the launch/MM treasuries.
     const treasury = Keypair.generate();
     const txnBuyerCount = BigInt(this.config.buyerWalletCount);
+
+    // Persist before funding (same fail-closed ordering as the launch stage).
+    this.persistLineage('txn-treasury', [treasury]);
+    this.persistLineage('txn-wallet', txnWallets);
+
     await this.fundTreasury(
       treasury,
       txnBuyerCount * (this.config.txnAmountRaw + 50_000n + 10_000n) + 50_000n,
@@ -1072,13 +1148,16 @@ export class LifecycleController {
     }
 
     // Use the profit pipeline
+    const relayWallets = Array.from({ length: this.config.relayWalletCount }, () => Keypair.generate());
+    // Relays receive real SOL mid-pipeline — persist them before routing.
+    this.persistLineage('exit-relay', relayWallets);
     const pipelineResult = await startProfitPipeline(this.ctx, {
       sourceWallet: profitWallet ?? Keypair.generate(), // placeholder when no profit wallet configured
       profitLamports: simulatedProfit,
       mode: this.options.dryRun ? 'simulate' : 'execute',
       config: {
         stealthEnabled: this.anonymity.stealthEnabled,
-        relayWallets: Array.from({ length: this.config.relayWalletCount }, () => Keypair.generate()),
+        relayWallets,
         stealthLegs: this.anonymity.stealthLegs,
         jitterBps: this.anonymity.jitterBps,
         maxStealthDelayMs: this.anonymity.maxStealthDelayMs,
