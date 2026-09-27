@@ -23,10 +23,10 @@
  * @module
  */
 
-import { Keypair, PublicKey, SystemProgram } from '@solana/web3.js';
+import { Keypair, PublicKey } from '@solana/web3.js';
 import type { SendOutcome, SwapVenue } from '@solana-toolkit/types';
 import { moduleLogger, sleep } from '@solana-toolkit/utils';
-import type { TransactionRequest } from '@solana-toolkit/transaction-builder';
+import { fundWallet, type TransactionRequest } from '@solana-toolkit/transaction-builder';
 import type { DexContext } from './context.js';
 import { executeSwap } from './swap.js';
 import { WSOL_MINT, pumpBuyInstruction, pumpSellInstruction, pumpBondingCurvePda, decodeBondingCurve, quoteSellLamportsOut } from '@solana-toolkit/solana-programs';
@@ -421,6 +421,13 @@ export async function increaseHolders(
      * fingerprint linking the buyers to one operator.
      */
     interBuyerDelayMs?: number;
+    /**
+     * Pre-fund each buyer from the treasury before the buy (default: true).
+     * Set to false when the caller already provisioned the buyers (e.g. the
+     * lifecycle controller funds them with randomized amounts via
+     * fundBuyersAnonymously) to avoid double-funding.
+     */
+    preFundBuyers?: boolean;
     /** Injectable RNG for deterministic tests. */
     rng?: () => number;
   },
@@ -429,25 +436,20 @@ export async function increaseHolders(
   // Funding overhead: purchase amount + 20k lamports for fees/rent.
   const fundingPerBuyer = params.buyLamportsPerWallet + 20_000n;
   const rng = params.rng ?? Math.random;
+  const preFund = params.preFundBuyers ?? true;
   for (const [index, buyer] of params.buyerWallets.entries()) {
     try {
       // 1. Pre-fund each buyer wallet from the treasury before purchase.
-      //    This ensures the buyer has sufficient SOL for the swap + fees.
-      await ctx.sender.send(
-        {
-          description: `fund buyer ${buyer.publicKey.toBase58().slice(0, 6)} for holder purchase`,
-          feePayer: params.treasury.publicKey.toBase58(),
-          instructions: [
-            SystemProgram.transfer({
-              fromPubkey: params.treasury.publicKey,
-              toPubkey: buyer.publicKey,
-              lamports: fundingPerBuyer,
-            }),
-          ],
-          signers: [params.treasury],
-        },
-        { mode: params.mode },
-      );
+      //    Shared helper (SystemProgram transfer via the simulation-first
+      //    sender) so the buyer can pay for the swap plus fees/rent.
+      if (preFund) {
+        await fundWallet(ctx, {
+          funder: params.treasury,
+          destination: buyer.publicKey,
+          lamports: fundingPerBuyer,
+          mode: params.mode,
+        });
+      }
 
       // 2. Execute the token purchase using the funded buyer wallet.
       await executeSwap(ctx, {

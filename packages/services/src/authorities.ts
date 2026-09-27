@@ -208,6 +208,12 @@ export async function burnLpByMint(
 /**
  * Freezes or thaws a holder's token account (requires the mint freeze
  * authority — see the security warnings around freezing).
+ *
+ * `tokenAccount` optionally names the exact token account to freeze. When
+ * omitted, the holder's ATA is derived — correct for the common case but
+ * blind to non-associated accounts (legacy/custodial token accounts), which
+ * holder scans DO see. Callers that scanned accounts (autoFreezeAllHolders)
+ * should always pass the scanned account.
  */
 export async function freezeAccount(
   ctx: ChainContext,
@@ -215,19 +221,23 @@ export async function freezeAccount(
     authority: Keypair;
     mint: string;
     holder: string;
+    /** Exact token account to freeze; defaults to the holder's derived ATA. */
+    tokenAccount?: string;
     freeze: boolean;
     mode?: 'simulate' | 'execute';
   },
 ): Promise<SendOutcome> {
   const tokenProgram = await detectProgram(ctx, params.mint);
-  const holderAta = getAssociatedTokenAddressSync(pk(params.mint), pk(params.holder), true, tokenProgram);
+  const account = params.tokenAccount
+    ? pk(params.tokenAccount)
+    : getAssociatedTokenAddressSync(pk(params.mint), pk(params.holder), true, tokenProgram);
   return ctx.sender.send(
     {
       description: `${params.freeze ? 'freeze' : 'unfreeze'} ${params.holder}`,
       feePayer: params.authority.publicKey.toBase58(),
       instructions: [
         freezeOrThawInstruction({
-          account: holderAta,
+          account,
           mint: pk(params.mint),
           freezeAuthority: params.authority.publicKey,
           freeze: params.freeze,
@@ -264,6 +274,10 @@ export async function autoFreezeAllHolders(
         authority: params.authority,
         mint: params.mint,
         holder: holder.owner,
+        // Freeze the exact token account the scan found — NOT a re-derived
+        // ATA. Long-tail holders may use non-associated token accounts,
+        // which the scan sees but ATA derivation would miss.
+        tokenAccount: holder.publicKey,
         freeze: true,
         mode: params.mode,
       });

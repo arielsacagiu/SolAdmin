@@ -23,7 +23,7 @@
  * @module
  */
 
-import { Keypair, PublicKey, TransactionInstruction } from '@solana/web3.js';
+import { Keypair, PublicKey, SystemProgram, TransactionInstruction } from '@solana/web3.js';
 import {
   createTransferInstruction,
   getAssociatedTokenAddressSync,
@@ -206,6 +206,8 @@ export async function startProfitPipeline(
   const jupiterApiBase =
     'jupiterApiBase' in ctx ? ctx.jupiterApiBase : config.jupiterApiBase;
   let usdcToDisperse = 0n;
+  /** True when leg 2 swapped into USDC; leg 3 then disperses USDC, else SOL. */
+  let swapped = false;
 
   if (config.swapToUsdc && config.useJupiter) {
     if (!jupiterApiBase) {
@@ -246,6 +248,7 @@ export async function startProfitPipeline(
         usdcToDisperse = swapIn / 2n; // simulated estimate for reporting
       }
       result.totalUsdcReceived = usdcToDisperse;
+      swapped = true;
       log.info({ sig: sent.signature, usdc: usdcToDisperse.toString() }, 'profit pipeline: USDC swap complete');
     } catch (err) {
       result.errors.push({ leg: 'swap', message: msg(err) });
@@ -253,9 +256,11 @@ export async function startProfitPipeline(
     }
     await sleep(config.delayBetweenStepsMs);
   } else {
-    // No USDC leg — dispersal operates on native SOL instead.
+    // No USDC leg — dispersal operates on native SOL instead. The terminus
+    // balance (minus fee headroom) is the dispersal total; leg 3 must send
+    // native SOL, not USDC, on this path.
     const relayBalance = await ctx.rpc.balance(terminus.publicKey.toBase58()).catch(() => 0n);
-    usdcToDisperse = relayBalance - 1_000_000n;
+    usdcToDisperse = relayBalance > 1_000_000n ? relayBalance - 1_000_000n : 0n;
     result.totalUsdcReceived = 0n;
   }
 
@@ -274,16 +279,28 @@ export async function startProfitPipeline(
     try {
       const amount = mode === 'simulate' ? 1n : perCex;
       if (amount <= 0n) continue;
-      const terminusAta = getAssociatedTokenAddressSync(usdcMint, terminus.publicKey, true, TOKEN_PROGRAM_ID);
-      const destAta = getAssociatedTokenAddressSync(
-        usdcMint,
-        new PublicKey(cex.address),
-        true,
-        TOKEN_PROGRAM_ID,
-      );
-      const instructions: TransactionInstruction[] = [
-        createTransferInstruction(terminusAta, destAta, terminus.publicKey, amount, [], TOKEN_PROGRAM_ID),
-      ];
+      // Swapped path: USDC SPL transfer terminus-ATA → deposit-ATA.
+      // No-swap path: plain SOL transfer — sending SOL amounts through the
+      // USDC transfer instruction would mis-scale the amount (6 decimals)
+      // and fail on missing ATAs.
+      const instructions: TransactionInstruction[] = swapped
+        ? [
+            createTransferInstruction(
+              getAssociatedTokenAddressSync(usdcMint, terminus.publicKey, true, TOKEN_PROGRAM_ID),
+              getAssociatedTokenAddressSync(usdcMint, new PublicKey(cex.address), true, TOKEN_PROGRAM_ID),
+              terminus.publicKey,
+              amount,
+              [],
+              TOKEN_PROGRAM_ID,
+            ),
+          ]
+        : [
+            SystemProgram.transfer({
+              fromPubkey: terminus.publicKey,
+              toPubkey: new PublicKey(cex.address),
+              lamports: amount,
+            }),
+          ];
       // SPL Memo v2 — required by exchanges that credit by deposit memo.
       if (cex.memo) {
         instructions.push(

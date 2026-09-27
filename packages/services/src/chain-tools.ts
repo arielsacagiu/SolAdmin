@@ -102,32 +102,10 @@ export async function reconstructHistory(ctx: ServiceContext, address: string, l
 
 /**
  * Funds a wallet from a funder (devnet testing / buyer wallet provisioning).
+ * Delegates to the shared transaction-builder helper (also used by the dex
+ * market-maker to pre-fund buyers) so services and dex share one code path.
  */
-export async function fundWallet(
-  ctx: ServiceContext,
-  params: {
-    funder: Keypair;
-    destination: PublicKey;
-    lamports: bigint;
-    mode?: 'simulate' | 'execute';
-  },
-): Promise<SendOutcome> {
-  return ctx.sender.send(
-    {
-      description: `fund ${params.destination.toBase58().slice(0, 8)} with ${params.lamports} lamports`,
-      feePayer: params.funder.publicKey.toBase58(),
-      instructions: [
-        SystemProgram.transfer({
-          fromPubkey: params.funder.publicKey,
-          toPubkey: params.destination,
-          lamports: params.lamports,
-        }),
-      ],
-      signers: [params.funder],
-    },
-    { mode: params.mode },
-  );
-}
+export { fundWallet } from '@solana-toolkit/transaction-builder';
 
 /**
  * RPC server mode configuration — the CLI/web app runs a local HTTP server

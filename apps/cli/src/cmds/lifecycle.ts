@@ -131,12 +131,17 @@ async function runControllerLifecycle(
     verboseMonitoring: cfg.monitor.verbose,
   } as Partial<LifecycleControllerConfig>;
 
+  // The config's persistent treasury keystore funds every fresh rotated
+  // treasury the controller generates (fresh treasuries start at 0 SOL).
+  const treasuryFunder = await loadWallet(cfg.treasuryKeystore);
+
   // Create and run the controller
   const controller = new LifecycleController({
     ctx: services,
     config: controllerConfig as LifecycleControllerConfig,
     dryRun: opts.dryRun ?? forcedSimulate,
     anonymityConfig: anonymityConfig as AnonymityConfig,
+    treasuryFunder,
   });
 
   const result: LifecycleResult = await controller.start();

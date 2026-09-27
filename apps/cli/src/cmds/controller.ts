@@ -34,7 +34,7 @@ export function registerControllerCommand(program: Command): void {
     .requiredOption('--metadata-uri <uri>', 'metadata URI')
     .option('--launch-venue <venue>', 'launch venue: pumpfun | moonit | raydium', 'pumpfun')
     .option('--buyer-count <count>', 'number of buyer wallets', (v) => parseInt(v, 10), 28)
-    .option('--buy-amount <lamports>', 'SOL amount per buyer in lamports', (v) => BigInt(v), 100_000_000n)
+    .option('--buy-amount <lamports>', 'SOL amount per buyer in lamports (default 100000000)', (v) => BigInt(v))
     .option('--slippage-bps <bps>', 'slippage tolerance in basis points', (v) => parseInt(v, 10), 100)
     .option('--target-holders <count>', 'target number of holders before freeze', (v) => parseInt(v, 10), 100)
     .option('--max-hold-seconds <seconds>', 'maximum hold time in seconds', (v) => parseInt(v, 10), 3600)
@@ -45,6 +45,9 @@ export function registerControllerCommand(program: Command): void {
     .option('--enable-social', 'enable social promotion')
     .option('--route-to-usdc', 'route profits to USDC')
     .option('--dry-run', 'run in dry-run mode (simulate all operations)')
+    .option('--treasury-funder <file>', 'persistent root keystore that funds each fresh rotated treasury (required for execute mode)')
+    .option('--freeze-authority <file>', 'keystore of the mint freeze authority (enables the freeze stage)')
+    .option('--profit-wallet <file>', 'keystore holding realized SOL profits (used by the exit stage)')
     .action(async (opts: GlobalOptions & {
       tokenName: string;
       tokenSymbol: string;
@@ -62,9 +65,18 @@ export function registerControllerCommand(program: Command): void {
       enableSocial?: boolean;
       routeToUsdc?: boolean;
       dryRun?: boolean;
+      treasuryFunder?: string;
+      freezeAuthority?: string;
+      profitWallet?: string;
     }) => {
       const { services, mode } = await bootstrap({ ...opts, execute: opts.execute });
       const dryRun = opts.dryRun || mode === 'simulate';
+
+      // Persistent wallets loaded from keystores (optional; the controller
+      // warns and degrades when they are missing).
+      const treasuryFunder = opts.treasuryFunder ? await loadWallet(opts.treasuryFunder) : undefined;
+      const freezeAuthority = opts.freezeAuthority ? await loadWallet(opts.freezeAuthority) : undefined;
+      const profitWallet = opts.profitWallet ? await loadWallet(opts.profitWallet) : undefined;
 
       const config: Partial<LifecycleConfig> = {
         // Token configuration
@@ -77,7 +89,7 @@ export function registerControllerCommand(program: Command): void {
         // Launch configuration
         launchVenue: opts.launchVenue as any,
         buyerWalletCount: opts.buyerCount,
-        buyLamportsPerWallet: opts.buyAmount,
+        buyLamportsPerWallet: opts.buyAmount ?? 100_000_000n,
         slippageBps: opts.slippageBps,
         useJito: true,
 
@@ -130,6 +142,9 @@ export function registerControllerCommand(program: Command): void {
         ctx: services,
         config: config as LifecycleConfig,
         dryRun,
+        treasuryFunder,
+        freezeAuthority,
+        profitWallet,
       });
 
       const result: LifecycleResult = await controller.start();

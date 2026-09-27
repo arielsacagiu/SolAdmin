@@ -23,6 +23,7 @@
 
 import { Keypair } from '@solana/web3.js';
 import { moduleLogger, sleep } from '@solana-toolkit/utils';
+import { fundWallet } from '@solana-toolkit/transaction-builder';
 import type { ServiceContext } from './context.js';
 import {
   increaseHolders,
@@ -251,6 +252,25 @@ export interface LifecycleControllerOptions {
   dryRun?: boolean;
   /** Custom anonymity configuration override. */
   anonymityConfig?: AnonymityConfig;
+  /**
+   * Persistent root wallet that tops up every fresh (rotated) treasury before
+   * its buyers are funded. Fresh treasuries start at zero SOL; without a
+   * funder, execute-mode funding transfers all fail. Simulation mode works
+   * without it.
+   */
+  treasuryFunder?: Keypair;
+  /**
+   * Wallet holding realized SOL profits; used as the profit-pipeline source
+   * in the exit stage. When omitted the exit stage uses a simulated 1 SOL
+   * placeholder and logs a warning.
+   */
+  profitWallet?: Keypair;
+  /**
+   * The mint's actual freeze authority keypair, required for the freeze
+   * stage to succeed. When omitted the freeze stage reports itself skipped
+   * instead of sending transactions a fresh keypair cannot authorize.
+   */
+  freezeAuthority?: Keypair;
 }
 
 /**
@@ -349,6 +369,35 @@ export class LifecycleController {
       ...DEFAULT_ANONYMITY_CONFIG,
       ...(this.options.anonymityConfig ?? this.config.anonymityConfig ?? {}),
     };
+  }
+
+  /**
+   * Tops up a fresh rotated treasury from the persistent root wallet
+   * (`options.treasuryFunder`). Fresh treasuries start at zero SOL — without
+   * this step every downstream buyer-funding transfer fails in execute mode.
+   * Returns false (and logs) when no funder is configured; simulation mode
+   * tolerates that, execute mode does not.
+   */
+  private async fundTreasury(treasury: Keypair, lamports: bigint): Promise<boolean> {
+    const funder = this.options.treasuryFunder;
+    if (!funder) {
+      log.warn(
+        { treasury: treasury.publicKey.toBase58().slice(0, 6) },
+        'no treasuryFunder configured — fresh treasury is UNFUNDED; execute-mode funding will fail',
+      );
+      return false;
+    }
+    await fundWallet(this.ctx, {
+      funder,
+      destination: treasury.publicKey,
+      lamports,
+      mode: this.options.dryRun ? 'simulate' : 'execute',
+    });
+    log.info(
+      { treasury: treasury.publicKey.toBase58().slice(0, 6), lamports: lamports.toString() },
+      'fresh treasury funded from root wallet',
+    );
+    return true;
   }
 
   /**
@@ -605,7 +654,17 @@ export class LifecycleController {
     // Generate fresh launch lineage (treasury + buyers)
     const lineage = freshLaunchLineage(this.config.buyerWalletCount);
 
-    // Pre-fund all buyer wallets from treasury
+    // Fund the fresh treasury from the persistent root wallet first: it
+    // starts at zero SOL, and every buyer-funding transfer below draws from
+    // it. Total = per-buyer funding (with fee headroom) for all buyers, plus
+    // per-transfer fee allowance and a buffer for the treasury's own fees.
+    const buyerCount = BigInt(this.config.buyerWalletCount);
+    const perBuyerFunding = this.config.buyLamportsPerWallet + 50_000n;
+    const treasuryFunding = buyerCount * (perBuyerFunding + 10_000n) + 50_000n;
+    await this.fundTreasury(lineage.treasury, treasuryFunding);
+
+    // Pre-fund all buyer wallets from the funded treasury with randomized
+    // amounts/delays (anonymity suite).
     const fundResult = await fundBuyersAnonymously({
       ctx: this.ctx,
       treasury: lineage.treasury,
@@ -622,7 +681,9 @@ export class LifecycleController {
       );
     }
 
-    // Execute launch buys
+    // Execute launch buys. preFundBuyers is disabled because the buyers
+    // were already provisioned above — otherwise increaseHolders would fund
+    // every buyer a second time.
     // Note: We need to handle the DexContext type properly
     const dexCtx = this.ctx as unknown as DexContext;
     const holderResult = await increaseHolders(dexCtx, {
@@ -634,6 +695,7 @@ export class LifecycleController {
       slippageBps: this.config.slippageBps,
       mode: this.options.dryRun ? 'simulate' : 'execute',
       interBuyerDelayMs: this.anonymity.maxInterBuyerDelayMs,
+      preFundBuyers: false,
     });
 
     // Update monitor data with launch results
@@ -669,6 +731,13 @@ export class LifecycleController {
 
     // Generate fresh wallets for market making
     const mmLineage = freshLaunchLineage(2); // 2 wallets for buy/sell
+
+    // Fund the fresh MM treasury from the root wallet: 2 wallets' buy
+    // notional + fee headroom, plus transfer fees.
+    await this.fundTreasury(
+      mmLineage.treasury,
+      2n * (this.config.mmBuyAmountRaw + 50_000n + 10_000n) + 50_000n,
+    );
 
     // Fund market maker wallets
     await fundBuyersAnonymously({
@@ -719,8 +788,14 @@ export class LifecycleController {
     // Import transaction generation function
     const txnWallets = freshBuyerWallets(this.config.buyerWalletCount);
 
-    // Fund transaction wallets (from main treasury - in practice would use launch treasury)
-    const treasury = Keypair.generate(); // Would use the actual treasury in practice
+    // Fresh single-use treasury for txn generation (rotation: no reuse),
+    // funded from the root wallet like the launch/MM treasuries.
+    const treasury = Keypair.generate();
+    const txnBuyerCount = BigInt(this.config.buyerWalletCount);
+    await this.fundTreasury(
+      treasury,
+      txnBuyerCount * (this.config.txnAmountRaw + 50_000n + 10_000n) + 50_000n,
+    );
     await fundBuyersAnonymously({
       ctx: this.ctx,
       treasury,
@@ -895,8 +970,20 @@ export class LifecycleController {
       };
     }
 
-    // Generate fresh freeze authority (in practice, this would be the actual freeze authority)
-    const freezeAuthority = Keypair.generate();
+    // The freeze stage must sign with the mint's ACTUAL freeze authority
+    // keypair — a freshly generated keypair cannot authorize freezes and
+    // every transaction would fail. Without one configured the stage reports
+    // itself skipped instead of sending doomed transactions.
+    const freezeAuthority = this.options.freezeAuthority;
+    if (!freezeAuthority) {
+      log.warn('no freezeAuthority configured — freeze stage skipped (pass options.freezeAuthority to enable)');
+      return {
+        stage: 'freeze',
+        success: true,
+        message: 'Freeze skipped: no freeze authority keypair configured (a fresh keypair cannot authorize freezes)',
+        data: { holders, target: this.config.targetHolders },
+      };
+    }
 
     const result = await autoFreezeAllHolders(this.ctx, {
       authority: freezeAuthority,
@@ -974,13 +1061,19 @@ export class LifecycleController {
       };
     }
 
-    // In practice, would calculate actual profits from token sales
-    // For this implementation, we'll use a simulated profit amount
-    const simulatedProfit = 1_000_000_000n; // 1 SOL profit (simulated)
+    // Route the realized profit through the pipeline. Without a configured
+    // profitWallet (holding actual proceeds) the stage runs the pipeline in
+    // simulation against a 1 SOL placeholder and warns — a fresh keypair
+    // would have nothing to route.
+    const profitWallet = this.options.profitWallet;
+    const simulatedProfit = 1_000_000_000n; // 1 SOL placeholder
+    if (!profitWallet) {
+      log.warn('no profitWallet configured — exit routes a simulated 1 SOL placeholder from an unfunded wallet');
+    }
 
     // Use the profit pipeline
     const pipelineResult = await startProfitPipeline(this.ctx, {
-      sourceWallet: Keypair.generate(), // Would use actual profit wallet
+      sourceWallet: profitWallet ?? Keypair.generate(), // placeholder when no profit wallet configured
       profitLamports: simulatedProfit,
       mode: this.options.dryRun ? 'simulate' : 'execute',
       config: {
